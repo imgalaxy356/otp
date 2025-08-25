@@ -40,15 +40,18 @@ app = Flask(__name__)
 # -------------------------
 # Telegram Bot (with increased pool size)
 # -------------------------
-bot = Bot(
-    token=TELEGRAM_TOKEN,
-    request_kwargs={
+application = (
+    ApplicationBuilder()
+    .token(TELEGRAM_TOKEN)
+    .get_updates_http_kwargs({
         "connect_timeout": 20,
         "read_timeout": 20,
         "pool_timeout": 20,
-        "pool_size": 20,  # increased from default
-    },
+        "pool_size": 20
+    })
+    .build()
 )
+
 application = ApplicationBuilder().bot(bot).build()
 
 # -------------------------
@@ -232,3 +235,4 @@ if __name__ == "__main__":
     asyncio.run(application.initialize())
     asyncio.run(application.start())
     asyncio.get_event_loop().run_forever()
+
