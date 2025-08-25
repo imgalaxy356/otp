@@ -3,21 +3,20 @@ import asyncio
 import threading
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot, request as telegram_request
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Request, Bot
 from telegram.ext import (
-    ApplicationBuilder,
+    Application,
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
     filters,
-    Request,
 )
 from twilio.rest import Client
 import stripe
 
 # -------------------------
-# CONFIG (env variables)
+# CONFIG (set via environment variables)
 # -------------------------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
@@ -25,7 +24,7 @@ TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")  # e.g., https://otp-xxxx.onrender.com
-PORT = int(os.getenv("PORT", 5000))
+PORT = int(os.environ.get("PORT", 5000))
 
 # -------------------------
 # Initialize services
@@ -33,35 +32,37 @@ PORT = int(os.getenv("PORT", 5000))
 stripe.api_key = STRIPE_SECRET_KEY
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
-# Custom Request for Telegram Bot (pool size + timeouts)
-request = telegram_request.Request(
-    connect_timeout=20,
-    read_timeout=20,
-    pool_timeout=20,
-    pool_size=20
-)
-
-bot = Bot(token=TELEGRAM_TOKEN, request=request)
-
-application = ApplicationBuilder().bot(bot).build()
-
 # -------------------------
 # Flask app
 # -------------------------
 app = Flask(__name__)
 
 # -------------------------
+# Telegram Bot with connection pool
+# -------------------------
+request_kwargs = Request(
+    connect_timeout=20,
+    read_timeout=20,
+    pool_timeout=20,
+    pool_size=20
+)
+
+bot = Bot(token=TELEGRAM_TOKEN, request=request_kwargs)
+application = Application.builder().bot(bot).build()
+
+# -------------------------
 # State storage
 # -------------------------
-paid_users = {}           # user_id -> expiry datetime
-user_phone_numbers = {}   # user_id -> phone
-user_last_message = {}    # user_id -> last custom call message
+paid_users = {}  # user_id -> expiry datetime
+user_phone_numbers = {}  # user_id -> phone
+user_last_message = {}  # user_id -> last custom call message
 
 # -------------------------
 # Helpers
 # -------------------------
 def is_paid(user_id: int) -> bool:
     return user_id in paid_users and datetime.now(timezone.utc) < paid_users[user_id]
+
 
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -80,7 +81,6 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("📞 Make Call", callback_data="make_call")],
             [InlineKeyboardButton("ℹ️ Help", callback_data="help")],
         ]
-
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     if update.message:
@@ -93,6 +93,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await main_menu(update, context)
+
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -143,6 +144,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ OTPs will appear here in Telegram."
         )
 
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
@@ -165,6 +167,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_last_message[user_id] = text
         await update.message.reply_text("📞 Use /call to place the call now.")
 
+
 async def call_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_paid(user_id):
@@ -182,28 +185,31 @@ async def call_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(f"📞 Call placed to {phone} (SID: {call.sid})")
 
+
 # -------------------------
 # Flask Routes
 # -------------------------
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
     try:
-        update = Update.de_json(request.json, bot)
+        update = Update.de_json(request.json, application.bot)
         asyncio.run_coroutine_threadsafe(application.process_update(update), asyncio.get_event_loop())
         return "ok", 200
     except Exception as e:
         print("Webhook error:", e)
         return "error", 500
 
+
 @app.route("/setwebhook", methods=["GET"])
 def set_webhook():
     webhook_url = f"{RENDER_EXTERNAL_URL}/{TELEGRAM_TOKEN}"
     try:
-        asyncio.run(bot.set_webhook(webhook_url))
+        asyncio.run(application.bot.set_webhook(webhook_url))
         return f"✅ Webhook set to {webhook_url}", 200
     except Exception as e:
         print("Webhook error:", e)
         return f"❌ Error setting webhook: {e}", 500
+
 
 @app.route("/success", methods=["GET"])
 def success():
@@ -211,9 +217,11 @@ def success():
     paid_users[user_id] = datetime.now(timezone.utc) + timedelta(days=4)
     return "✅ Payment successful. You now have 4 days of access."
 
+
 @app.route("/cancel", methods=["GET"])
 def cancel():
     return "❌ Payment canceled."
+
 
 # -------------------------
 # Register Handlers
@@ -223,15 +231,19 @@ application.add_handler(CommandHandler("call", call_command))
 application.add_handler(CallbackQueryHandler(button_handler))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+
 # -------------------------
 # Run Flask + Telegram bot
 # -------------------------
 def run_flask():
     app.run(host="0.0.0.0", port=PORT)
 
+
 if __name__ == "__main__":
+    # Start Flask in a separate thread
     threading.Thread(target=run_flask).start()
+
+    # Start Telegram application
     asyncio.run(application.initialize())
     asyncio.run(application.start())
     asyncio.get_event_loop().run_forever()
-
