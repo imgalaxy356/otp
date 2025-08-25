@@ -2,6 +2,7 @@ import os
 import asyncio
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
+loop = asyncio.get_event_loop()  # create the loop once at the top
 
 from flask import Flask, request, Response
 import requests
@@ -212,12 +213,9 @@ flask_app = Flask(__name__)
 
 @flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
-    """Process incoming Telegram updates using the existing loop."""
-    update_json = request.get_json(force=True)
-    update = Update.de_json(update_json, app_telegram.bot)
-    asyncio.create_task(app_telegram.process_update(update))
+    update = Update.de_json(request.get_json(force=True), app_telegram.bot)
+    asyncio.run_coroutine_threadsafe(app_telegram.process_update(update), loop)
     return "OK", 200
-
 # -------------------------
 # Twilio voice routes
 # -------------------------
@@ -289,3 +287,4 @@ def payment_cancel():
 if __name__ == "__main__":
     # Run Flask with threaded=True so multiple requests can be processed
     flask_app.run(host="0.0.0.0", port=PORT, threaded=True)
+
