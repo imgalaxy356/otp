@@ -200,7 +200,8 @@ loop = asyncio.get_event_loop()
 @flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
     update = Update.de_json(request.get_json(force=True), app_telegram.bot)
-    asyncio.run_coroutine_threadsafe(app_telegram.process_update(update), loop)
+    loop = asyncio.get_running_loop()
+    loop.create_task(app_telegram.process_update(update))
     return "OK", 200
 
 @flask_app.route("/voice", methods=["POST","GET"])
@@ -247,3 +248,4 @@ def call_status():
 
 if __name__ == "__main__":
     flask_app.run(host="0.0.0.0", port=PORT)
+
