@@ -1,9 +1,8 @@
 import os
 import asyncio
-import threading
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -14,9 +13,10 @@ from telegram.ext import (
 )
 from twilio.rest import Client
 import stripe
+import threading
 
 # -------------------------
-# CONFIG
+# CONFIG (env variables)
 # -------------------------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
@@ -38,29 +38,25 @@ twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 app = Flask(__name__)
 
 # -------------------------
-# Telegram bot
+# Telegram bot application
 # -------------------------
-bot = Bot(token=TELEGRAM_TOKEN)
-application = Application.builder().bot(bot).build()
+application = Application.builder().token(TELEGRAM_TOKEN).build()
 
 # -------------------------
 # State storage
 # -------------------------
-paid_users = {}  # user_id -> expiry datetime
-user_phone_numbers = {}  # user_id -> phone
-user_last_message = {}  # user_id -> last custom call message
+paid_users = {}          # user_id -> expiry datetime
+user_phone_numbers = {}  # user_id -> phone number
+user_last_message = {}   # user_id -> last custom call message
 
 # -------------------------
-# Helpers
+# Helper functions
 # -------------------------
 def is_paid(user_id: int) -> bool:
     return user_id in paid_users and datetime.now(timezone.utc) < paid_users[user_id]
 
-
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    keyboard = []
-
     if is_paid(user_id):
         keyboard = [
             [InlineKeyboardButton("📱 Set Phone", callback_data="set_phone")],
@@ -75,19 +71,16 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("ℹ️ Help", callback_data="help")],
         ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-
     if update.message:
         await update.message.reply_text("👋 Welcome! Choose an option:", reply_markup=reply_markup)
     elif update.callback_query:
         await update.callback_query.message.reply_text("👋 Welcome! Choose an option:", reply_markup=reply_markup)
-
 
 # -------------------------
 # Telegram Handlers
 # -------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await main_menu(update, context)
-
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -138,29 +131,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ OTPs will appear here in Telegram."
         )
 
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
-    # Phone number input
+    # Save phone number
     if text.startswith("+") and text[1:].isdigit():
         user_phone_numbers[user_id] = text
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("📞 Make Call", callback_data="make_call")],
             [InlineKeyboardButton("ℹ️ Help", callback_data="help")],
         ])
-        await update.message.reply_text(
-            f"✅ Phone number saved: {text}\nNow you can make calls.",
-            reply_markup=keyboard
-        )
+        await update.message.reply_text(f"✅ Phone saved: {text}", reply_markup=keyboard)
         return
 
-    # Custom call message
+    # Save custom message
     if user_id in user_phone_numbers:
         user_last_message[user_id] = text
         await update.message.reply_text("📞 Use /call to place the call now.")
-
 
 async def call_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -179,31 +167,24 @@ async def call_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(f"📞 Call placed to {phone} (SID: {call.sid})")
 
-
 # -------------------------
-# Flask Routes
+# Flask Webhook Routes
 # -------------------------
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
-    try:
-        update_obj = Update.de_json(request.json, application.bot)
-        asyncio.run_coroutine_threadsafe(application.process_update(update_obj), asyncio.get_event_loop())
-        return "ok", 200
-    except Exception as e:
-        print("Webhook error:", e)
-        return "error", 500
-
+    update_obj = Update.de_json(request.json, application.bot)
+    asyncio.run_coroutine_threadsafe(application.process_update(update_obj), application.loop)
+    return "ok", 200
 
 @app.route("/setwebhook", methods=["GET"])
 def set_webhook():
     webhook_url = f"{RENDER_EXTERNAL_URL}/{TELEGRAM_TOKEN}"
     try:
-        asyncio.run(application.bot.set_webhook(webhook_url))
+        fut = asyncio.run_coroutine_threadsafe(application.bot.set_webhook(webhook_url), application.loop)
+        fut.result()  # wait for completion
         return f"✅ Webhook set to {webhook_url}", 200
     except Exception as e:
-        print("Webhook error:", e)
         return f"❌ Error setting webhook: {e}", 500
-
 
 @app.route("/success", methods=["GET"])
 def success():
@@ -211,33 +192,28 @@ def success():
     paid_users[user_id] = datetime.now(timezone.utc) + timedelta(days=4)
     return "✅ Payment successful. You now have 4 days of access."
 
-
 @app.route("/cancel", methods=["GET"])
 def cancel():
     return "❌ Payment canceled."
 
-
 # -------------------------
-# Register Handlers
+# Register Telegram Handlers
 # -------------------------
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("call", call_command))
 application.add_handler(CallbackQueryHandler(button_handler))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-
 # -------------------------
-# Run Flask + Telegram bot
+# Run Flask + Bot
 # -------------------------
 def run_flask():
     app.run(host="0.0.0.0", port=PORT)
 
-
 if __name__ == "__main__":
     # Start Flask in a thread
     threading.Thread(target=run_flask).start()
-
-    # Start Telegram application
+    # Initialize and start bot without polling
     asyncio.run(application.initialize())
     asyncio.run(application.start())
     asyncio.get_event_loop().run_forever()
