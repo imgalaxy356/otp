@@ -237,10 +237,11 @@ def run_flask():
 
 if __name__ == "__main__":
     # Start Flask in a thread
-    threading.Thread(target=run_flask, daemon=True).start()
+    threading.Thread(target=run_flask).start()
 
     # Start Telegram application
     asyncio.run(application.initialize())
     asyncio.run(application.start())
     asyncio.get_event_loop().run_forever()
+
 
