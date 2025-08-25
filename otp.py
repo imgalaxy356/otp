@@ -12,6 +12,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from telegram.request import HTTPXRequest
 from twilio.rest import Client
 import stripe
 
@@ -32,8 +33,16 @@ twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 # Flask app
 app = Flask(__name__)
 
-# Telegram bot
-application = Application.builder().token(TELEGRAM_TOKEN).build()
+# -------------------------
+# Telegram bot (with bigger pool)
+# -------------------------
+request = HTTPXRequest(
+    connection_pool_size=50,
+    read_timeout=30.0,
+    write_timeout=30.0,
+    connect_timeout=10.0,
+)
+application = Application.builder().token(TELEGRAM_TOKEN).request(request).build()
 
 # -------------------------
 # State storage
@@ -177,8 +186,7 @@ async def call_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
     update = Update.de_json(request.get_json(force=True), application.bot)
-    # ✅ Push update into application's update queue
-    application.update_queue.put_nowait(update)
+    application.update_queue.put_nowait(update)  # push into queue
     return "ok"
 
 
@@ -216,5 +224,3 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_m
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
-
