@@ -131,7 +131,6 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📞 Make Call", callback_data="call")],
                 [InlineKeyboardButton("↩️ Back to Menu", callback_data="menu")],
                 [InlineKeyboardButton("ℹ️ Info / Usage", callback_data="help")]
             ])
@@ -206,9 +205,6 @@ app_telegram.add_handler(CommandHandler("start", start))
 app_telegram.add_handler(CallbackQueryHandler(handle_buttons))
 app_telegram.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-# Initialize the app (required for webhook)
-asyncio.run(app_telegram.initialize())
-
 # -------------------------
 # Flask app for webhook
 # -------------------------
@@ -216,15 +212,14 @@ flask_app = Flask(__name__)
 
 @flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
-    """Handle incoming Telegram webhook updates."""
+    """Process incoming Telegram updates using the existing loop."""
     update_json = request.get_json(force=True)
     update = Update.de_json(update_json, app_telegram.bot)
-    # Run the async update handler in a fresh event loop
-    asyncio.run(app_telegram.process_update(update))
+    asyncio.create_task(app_telegram.process_update(update))
     return "OK", 200
 
 # -------------------------
-# Twilio / Stripe routes
+# Twilio voice routes
 # -------------------------
 @flask_app.route("/voice", methods=["POST", "GET"])
 def voice():
@@ -272,6 +267,9 @@ def call_status():
         )
     return ("", 204)
 
+# -------------------------
+# Stripe payment routes
+# -------------------------
 @flask_app.route("/success")
 def payment_success():
     user_id = request.args.get("user_id")
@@ -289,5 +287,5 @@ def payment_cancel():
 # Run Flask server
 # -------------------------
 if __name__ == "__main__":
-    flask_app.run(host="0.0.0.0", port=PORT)
-
+    # Run Flask with threaded=True so multiple requests can be processed
+    flask_app.run(host="0.0.0.0", port=PORT, threaded=True)
