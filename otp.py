@@ -66,8 +66,13 @@ def index():
 @app.route("/setwebhook", methods=["GET"])
 def set_webhook():
     webhook_url = f"{os.getenv('RENDER_URL')}/{TELEGRAM_TOKEN}"
-    asyncio.run(application.bot.set_webhook(webhook_url))
-    return f"Webhook set to {webhook_url}", 200
+    try:
+        loop = asyncio.get_event_loop()
+        loop.create_task(application.bot.set_webhook(webhook_url))
+        return f"Webhook set to {webhook_url}", 200
+    except Exception as e:
+        print("Webhook error:", e)
+        return "error", 500
 
 
 # =========================
@@ -85,3 +90,5 @@ if __name__ == "__main__":
     asyncio.run(application.initialize())
     asyncio.run(application.start())
     asyncio.get_event_loop().run_forever()
+
+
