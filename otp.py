@@ -3,7 +3,8 @@ import asyncio
 import threading
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Request, Bot
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from telegram.request import Request  # ✅ correct import
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -12,6 +13,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+
 from twilio.rest import Client
 import stripe
 
@@ -247,3 +249,4 @@ if __name__ == "__main__":
     asyncio.run(application.initialize())
     asyncio.run(application.start())
     asyncio.get_event_loop().run_forever()
+
