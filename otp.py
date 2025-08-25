@@ -11,51 +11,48 @@ from telegram.ext import (
     MessageHandler,
     ContextTypes,
     filters,
-    ConnectionPool,
-    DefaultRateLimiter,
 )
 from twilio.rest import Client
 import stripe
+from telegram.constants import ParseMode
 
 # -------------------------
-# CONFIG (environment variables)
+# CONFIG (env vars)
 # -------------------------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")  # e.g., https://otp-xxxx.onrender.com
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.environ.get("PORT", 5000))
 
 # -------------------------
-# Initialize services
+# Services
 # -------------------------
 stripe.api_key = STRIPE_SECRET_KEY
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
 # -------------------------
-# Flask app
+# Flask
 # -------------------------
 app = Flask(__name__)
 
 # -------------------------
-# Telegram bot with bigger connection pool
+# Telegram bot
 # -------------------------
-connection_pool = ConnectionPool(max_connections=10, pool_timeout=30)
-rate_limiter = DefaultRateLimiter()
 application = Application.builder() \
     .token(TELEGRAM_TOKEN) \
-    .connection_pool(connection_pool) \
-    .rate_limiter(rate_limiter) \
+    .concurrent_updates(True) \
+    .get_updates_http_kwargs({"pool_size": 10, "timeout": 30}) \
     .build()
 
 # -------------------------
 # State storage
 # -------------------------
-paid_users = {}  # user_id -> expiry datetime
-user_phone_numbers = {}  # user_id -> phone
-user_last_message = {}  # user_id -> last custom call message
+paid_users = {}
+user_phone_numbers = {}
+user_last_message = {}
 
 # -------------------------
 # Helpers
@@ -88,7 +85,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.message.reply_text("👋 Welcome! Choose an option:", reply_markup=reply_markup)
 
 # -------------------------
-# Telegram Handlers
+# Handlers
 # -------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await main_menu(update, context)
@@ -180,7 +177,7 @@ async def call_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"📞 Call placed to {phone} (SID: {call.sid})")
 
 # -------------------------
-# Flask Routes
+# Flask routes
 # -------------------------
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
@@ -196,7 +193,6 @@ def telegram_webhook():
 def set_webhook():
     webhook_url = f"{RENDER_EXTERNAL_URL}/{TELEGRAM_TOKEN}"
     try:
-        # Safely await webhook set
         asyncio.run(application.bot.set_webhook(webhook_url))
         return f"✅ Webhook set to {webhook_url}", 200
     except Exception as e:
@@ -214,7 +210,7 @@ def cancel():
     return "❌ Payment canceled."
 
 # -------------------------
-# Register Handlers
+# Register handlers
 # -------------------------
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("call", call_command))
@@ -228,10 +224,7 @@ def run_flask():
     app.run(host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
-    # Start Flask in a thread
     threading.Thread(target=run_flask).start()
-
-    # Initialize and start the bot safely
     asyncio.run(application.initialize())
     asyncio.run(application.start())
     asyncio.get_event_loop().run_forever()
