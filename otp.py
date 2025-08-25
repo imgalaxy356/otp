@@ -1,5 +1,4 @@
 import os
-import threading
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
@@ -14,6 +13,7 @@ from telegram.ext import (
 from twilio.rest import Client
 import stripe
 import asyncio
+import threading
 
 # -------------------------
 # CONFIG
@@ -31,17 +31,13 @@ PORT = int(os.environ.get("PORT", 5000))
 # -------------------------
 stripe.api_key = STRIPE_SECRET_KEY
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+bot = Bot(token=TELEGRAM_TOKEN)
+application = Application.builder().bot(bot).build()
 
 # -------------------------
 # Flask app
 # -------------------------
 app = Flask(__name__)
-
-# -------------------------
-# Telegram bot
-# -------------------------
-bot = Bot(token=TELEGRAM_TOKEN)
-application = Application.builder().bot(bot).build()
 
 # -------------------------
 # State storage
@@ -177,17 +173,11 @@ async def call_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------------------------
 # Flask Routes
 # -------------------------
-import asyncio
-
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
     try:
         update_obj = Update.de_json(request.json, application.bot)
-        # Create a new loop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(application.process_update(update_obj))
-        loop.close()
+        asyncio.run_coroutine_threadsafe(application.process_update(update_obj), asyncio.get_event_loop())
         return "ok", 200
     except Exception as e:
         print("Webhook error:", e)
@@ -197,11 +187,7 @@ def telegram_webhook():
 def set_webhook():
     webhook_url = f"{RENDER_EXTERNAL_URL}/{TELEGRAM_TOKEN}"
     try:
-        # Create a new loop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(application.bot.set_webhook(webhook_url))
-        loop.close()
+        asyncio.run(application.bot.set_webhook(webhook_url))
         return f"✅ Webhook set to {webhook_url}", 200
     except Exception as e:
         print("Webhook error:", e)
@@ -226,15 +212,8 @@ application.add_handler(CallbackQueryHandler(button_handler))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 # -------------------------
-# Run Flask + Telegram bot
+# Run Flask only
 # -------------------------
-def run_flask():
-    app.run(host="0.0.0.0", port=PORT)
-
 if __name__ == "__main__":
-    # Start Flask in a separate thread
-    threading.Thread(target=run_flask).start()
-    
-    # Start Telegram bot in polling mode (manages its own event loop)
-    application.run_polling(poll_interval=1)
-
+    # Flask in main thread
+    app.run(host="0.0.0.0", port=PORT)
