@@ -3,9 +3,9 @@ import asyncio
 import threading
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import (
-    Application,
+    ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
@@ -16,7 +16,7 @@ from twilio.rest import Client
 import stripe
 
 # -------------------------
-# CONFIG (environment variables)
+# CONFIG (Environment variables)
 # -------------------------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
@@ -38,16 +38,25 @@ twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 app = Flask(__name__)
 
 # -------------------------
-# Telegram bot
+# Telegram Bot (with increased pool size)
 # -------------------------
-application = Application.builder().token(TELEGRAM_TOKEN).build()
+bot = Bot(
+    token=TELEGRAM_TOKEN,
+    request_kwargs={
+        "connect_timeout": 20,
+        "read_timeout": 20,
+        "pool_timeout": 20,
+        "pool_size": 20,  # increased from default
+    },
+)
+application = ApplicationBuilder().bot(bot).build()
 
 # -------------------------
 # State storage
 # -------------------------
-paid_users = {}  # user_id -> expiry datetime
-user_phone_numbers = {}  # user_id -> phone
-user_last_message = {}  # user_id -> last custom call message
+paid_users = {}           # user_id -> expiry datetime
+user_phone_numbers = {}   # user_id -> phone
+user_last_message = {}    # user_id -> last custom call message
 
 # -------------------------
 # Helpers
@@ -219,10 +228,7 @@ def run_flask():
     app.run(host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
-    # Start Flask in a thread
     threading.Thread(target=run_flask).start()
-
-    # Start Telegram bot
     asyncio.run(application.initialize())
     asyncio.run(application.start())
     asyncio.get_event_loop().run_forever()
