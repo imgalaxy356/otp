@@ -3,7 +3,7 @@ import asyncio
 import threading
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot, request as telegram_request
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -34,7 +34,7 @@ stripe.api_key = STRIPE_SECRET_KEY
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
 # Custom Request for Telegram Bot (pool size + timeouts)
-request = Request(
+request = telegram_request.Request(
     connect_timeout=20,
     read_timeout=20,
     pool_timeout=20,
@@ -42,6 +42,7 @@ request = Request(
 )
 
 bot = Bot(token=TELEGRAM_TOKEN, request=request)
+
 application = ApplicationBuilder().bot(bot).build()
 
 # -------------------------
@@ -233,3 +234,4 @@ if __name__ == "__main__":
     asyncio.run(application.initialize())
     asyncio.run(application.start())
     asyncio.get_event_loop().run_forever()
+
