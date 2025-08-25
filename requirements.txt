@@ -1,5 +1,4 @@
-python-telegram-bot==20.7
-Flask==3.0.2
-stripe==8.5.0
-twilio==9.0.0
-requests==2.31.0
+flask
+python-telegram-bot>=20.0
+twilio
+stripe
