@@ -198,15 +198,13 @@ def telegram_webhook():
 def set_webhook():
     webhook_url = f"{RENDER_EXTERNAL_URL}/{TELEGRAM_TOKEN}"
     try:
-        fut = asyncio.run_coroutine_threadsafe(
-            application.bot.set_webhook(webhook_url),
-            application.loop
-        )
-        fut.result(timeout=10)
-        return f"Webhook set to {webhook_url}", 200
+        # Use asyncio.run to safely await coroutine
+        asyncio.run(application.bot.set_webhook(webhook_url))
+        return f"✅ Webhook set to {webhook_url}", 200
     except Exception as e:
         print("Webhook error:", e)
-        return f"error: {e}", 500
+        return f"❌ Error setting webhook: {e}", 500
+
 
 
 @app.route("/success", methods=["GET"])
@@ -245,3 +243,4 @@ if __name__ == "__main__":
     asyncio.run(application.initialize())
     asyncio.run(application.start())
     asyncio.get_event_loop().run_forever()
+
