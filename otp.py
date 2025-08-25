@@ -4,7 +4,6 @@ import threading
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.request import Request  # ✅ correct import in PTB v20+
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -41,9 +40,18 @@ app = Flask(__name__)
 # -------------------------
 # Telegram bot
 # -------------------------
-req = Request(con_pool_size=20, read_timeout=30)  # Increase pool size for concurrent users
-bot = Bot(token=TELEGRAM_TOKEN, request=req)
-application = Application.builder().bot(bot).build()
+bot = Bot(token=TELEGRAM_TOKEN)
+
+# Increase concurrency & read timeout to prevent pool timeouts
+application = (
+    Application.builder()
+    .bot(bot)
+    .concurrent_updates(50)   # increase concurrent updates
+    .read_timeout(30)         # increase read timeout
+    .write_timeout(30)        # increase write timeout
+    .connect_timeout(30)      # increase connect timeout
+    .build()
+)
 
 # -------------------------
 # State storage
@@ -141,7 +149,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
-    # Phone number input
     if text.startswith("+") and text[1:].isdigit():
         user_phone_numbers[user_id] = text
         keyboard = InlineKeyboardMarkup([
@@ -154,7 +161,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Custom call message
     if user_id in user_phone_numbers:
         user_last_message[user_id] = text
         await update.message.reply_text("📞 Use /call to place the call now.")
