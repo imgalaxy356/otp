@@ -16,7 +16,7 @@ from twilio.rest import Client
 import stripe
 
 # -------------------------
-# CONFIG (from environment variables)
+# CONFIG (environment variables)
 # -------------------------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
@@ -38,16 +38,9 @@ twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 app = Flask(__name__)
 
 # -------------------------
-# Telegram bot application
+# Telegram bot
 # -------------------------
-application = Application.builder() \
-    .token(TELEGRAM_TOKEN) \
-    .request_kwargs({
-        "pool_size": 10,          # number of connections in pool
-        "connect_timeout": 30,    # connection timeout
-        "read_timeout": 30        # read timeout
-    }) \
-    .build()
+application = Application.builder().token(TELEGRAM_TOKEN).build()
 
 # -------------------------
 # State storage
@@ -61,7 +54,6 @@ user_last_message = {}  # user_id -> last custom call message
 # -------------------------
 def is_paid(user_id: int) -> bool:
     return user_id in paid_users and datetime.now(timezone.utc) < paid_users[user_id]
-
 
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -92,7 +84,6 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await main_menu(update, context)
-
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -143,12 +134,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ OTPs will appear here in Telegram."
         )
 
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
-    # Phone number input
     if text.startswith("+") and text[1:].isdigit():
         user_phone_numbers[user_id] = text
         keyboard = InlineKeyboardMarkup([
@@ -161,11 +150,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Custom call message
     if user_id in user_phone_numbers:
         user_last_message[user_id] = text
         await update.message.reply_text("📞 Use /call to place the call now.")
-
 
 async def call_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -197,7 +184,6 @@ def telegram_webhook():
         print("Webhook error:", e)
         return "error", 500
 
-
 @app.route("/setwebhook", methods=["GET"])
 def set_webhook():
     webhook_url = f"{RENDER_EXTERNAL_URL}/{TELEGRAM_TOKEN}"
@@ -208,18 +194,15 @@ def set_webhook():
         print("Webhook error:", e)
         return f"❌ Error setting webhook: {e}", 500
 
-
 @app.route("/success", methods=["GET"])
 def success():
     user_id = int(request.args.get("user_id"))
     paid_users[user_id] = datetime.now(timezone.utc) + timedelta(days=4)
     return "✅ Payment successful. You now have 4 days of access."
 
-
 @app.route("/cancel", methods=["GET"])
 def cancel():
     return "❌ Payment canceled."
-
 
 # -------------------------
 # Register Handlers
@@ -235,8 +218,8 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_m
 def run_flask():
     app.run(host="0.0.0.0", port=PORT)
 
-
 if __name__ == "__main__":
+    # Start Flask in a thread
     threading.Thread(target=run_flask).start()
 
     # Start Telegram bot
