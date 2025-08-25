@@ -216,9 +216,11 @@ flask_app = Flask(__name__)
 
 @flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
-    update = Update.de_json(request.get_json(force=True), app_telegram.bot)
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(app_telegram.process_update(update))
+    """Handle incoming Telegram webhook updates."""
+    update_json = request.get_json(force=True)
+    update = Update.de_json(update_json, app_telegram.bot)
+    # Run the async update handler in a fresh event loop
+    asyncio.run(app_telegram.process_update(update))
     return "OK", 200
 
 # -------------------------
@@ -288,3 +290,4 @@ def payment_cancel():
 # -------------------------
 if __name__ == "__main__":
     flask_app.run(host="0.0.0.0", port=PORT)
+
