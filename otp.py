@@ -177,11 +177,17 @@ async def call_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -------------------------
 # Flask Routes
 # -------------------------
+import asyncio
+
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
     try:
         update_obj = Update.de_json(request.json, application.bot)
-        asyncio.create_task(application.process_update(update_obj))
+        # Create a new loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(application.process_update(update_obj))
+        loop.close()
         return "ok", 200
     except Exception as e:
         print("Webhook error:", e)
@@ -191,9 +197,11 @@ def telegram_webhook():
 def set_webhook():
     webhook_url = f"{RENDER_EXTERNAL_URL}/{TELEGRAM_TOKEN}"
     try:
-        loop = asyncio.get_event_loop()
-        future = asyncio.run_coroutine_threadsafe(application.bot.set_webhook(webhook_url), loop)
-        future.result(timeout=10)
+        # Create a new loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(application.bot.set_webhook(webhook_url))
+        loop.close()
         return f"✅ Webhook set to {webhook_url}", 200
     except Exception as e:
         print("Webhook error:", e)
@@ -229,3 +237,4 @@ if __name__ == "__main__":
     
     # Start Telegram bot in polling mode (manages its own event loop)
     application.run_polling(poll_interval=1)
+
