@@ -3,7 +3,8 @@ import asyncio
 import threading
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot, Request
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.request import Request  # ✅ correct import in PTB v20+
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -40,7 +41,7 @@ app = Flask(__name__)
 # -------------------------
 # Telegram bot
 # -------------------------
-req = Request(con_pool_size=10, read_timeout=30)
+req = Request(con_pool_size=20, read_timeout=30)  # Increase pool size for concurrent users
 bot = Bot(token=TELEGRAM_TOKEN, request=req)
 application = Application.builder().bot(bot).build()
 
@@ -56,7 +57,6 @@ user_last_message = {}   # user_id -> last custom call message
 # -------------------------
 def is_paid(user_id: int) -> bool:
     return user_id in paid_users and datetime.now(timezone.utc) < paid_users[user_id]
-
 
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -224,10 +224,7 @@ def run_flask():
     app.run(host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
-    # Start Flask in a thread
     threading.Thread(target=run_flask).start()
-
-    # Start Telegram application
     asyncio.run(application.initialize())
     asyncio.run(application.start())
     asyncio.get_event_loop().run_forever()
