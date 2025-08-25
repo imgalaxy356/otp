@@ -3,7 +3,7 @@ import asyncio
 import threading
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request
-from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -40,16 +40,13 @@ app = Flask(__name__)
 # -------------------------
 # Telegram bot
 # -------------------------
-bot = Bot(token=TELEGRAM_TOKEN)
-
-# Increase concurrency & read timeout to prevent pool timeouts
 application = (
     Application.builder()
-    .bot(bot)
+    .token(TELEGRAM_TOKEN)
     .concurrent_updates(50)   # increase concurrent updates
-    .read_timeout(30)         # increase read timeout
-    .write_timeout(30)        # increase write timeout
-    .connect_timeout(30)      # increase connect timeout
+    .read_timeout(30)
+    .write_timeout(30)
+    .connect_timeout(30)
     .build()
 )
 
@@ -149,6 +146,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
+    # Phone number input
     if text.startswith("+") and text[1:].isdigit():
         user_phone_numbers[user_id] = text
         keyboard = InlineKeyboardMarkup([
@@ -161,6 +159,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Custom call message
     if user_id in user_phone_numbers:
         user_last_message[user_id] = text
         await update.message.reply_text("📞 Use /call to place the call now.")
