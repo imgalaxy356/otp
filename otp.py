@@ -41,7 +41,7 @@ app = Flask(__name__)
 # -------------------------
 # Telegram bot
 # -------------------------
-req = request.Request(con_pool_size=10, read_timeout=30)
+req = request.request(con_pool_size=10, read_timeout=30)
 bot = Bot(token=TELEGRAM_TOKEN, request=req)
 application = Application.builder().bot(bot).build()
 
@@ -243,3 +243,4 @@ if __name__ == "__main__":
     asyncio.run(application.initialize())
     asyncio.run(application.start())
     asyncio.get_event_loop().run_forever()
+
