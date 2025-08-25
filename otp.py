@@ -23,7 +23,7 @@ TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")  # e.g., https://otp-28gz.onrender.com
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")  # e.g., https://otp-xxxx.onrender.com
 
 # Initialize services
 stripe.api_key = STRIPE_SECRET_KEY
@@ -52,6 +52,8 @@ def is_paid(user_id: int) -> bool:
 
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    keyboard = []
+
     if is_paid(user_id):
         keyboard = [
             [InlineKeyboardButton("📱 Set Phone", callback_data="set_phone")],
@@ -61,11 +63,16 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         keyboard = [
             [InlineKeyboardButton("💳 Pay $25 (4 days)", callback_data="buy")],
+            [InlineKeyboardButton("📱 Set Phone", callback_data="set_phone")],
+            [InlineKeyboardButton("📞 Make Call", callback_data="make_call")],
             [InlineKeyboardButton("ℹ️ Help", callback_data="help")],
         ]
-
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("👋 Welcome! Choose an option:", reply_markup=reply_markup)
+
+    if update.message:
+        await update.message.reply_text("👋 Welcome! Choose an option:", reply_markup=reply_markup)
+    elif update.callback_query:
+        await update.callback_query.message.reply_text("👋 Welcome! Choose an option:", reply_markup=reply_markup)
 
 
 # -------------------------
@@ -129,13 +136,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
-    # Phone number input
     if text.startswith("+") and text[1:].isdigit():
         user_phone_numbers[user_id] = text
-        await update.message.reply_text(f"✅ Phone number saved: {text}\nNow you can make calls.")
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📞 Make Call", callback_data="make_call")],
+            [InlineKeyboardButton("ℹ️ Help", callback_data="help")],
+        ])
+        await update.message.reply_text(
+            f"✅ Phone number saved: {text}\nNow you can make calls.",
+            reply_markup=keyboard
+        )
         return
 
-    # Custom call message
     if user_id in user_phone_numbers:
         user_last_message[user_id] = text
         await update.message.reply_text("📞 Use /call to place the call now.")
@@ -189,7 +201,7 @@ def cancel():
 
 
 # -------------------------
-# Register Telegram Handlers
+# Register Handlers
 # -------------------------
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("call", call_command))
@@ -198,20 +210,8 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_m
 
 
 # -------------------------
-# Run Flask + Telegram bot
+# Run Flask only
 # -------------------------
-def run_telegram():
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 5000)),
-        url_path=TELEGRAM_TOKEN,
-        webhook_url=f"{RENDER_EXTERNAL_URL}/{TELEGRAM_TOKEN}",
-    )
-
-
 if __name__ == "__main__":
-    # Run Telegram bot in background
-    threading.Thread(target=run_telegram, daemon=True).start()
-
-    # Run Flask (for Stripe + extra routes)
-    app.run(host="0.0.0.0", port=int(os.environ.get("FLASK_PORT", 10000)))
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
