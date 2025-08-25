@@ -11,12 +11,13 @@ from telegram.ext import (
     MessageHandler,
     ContextTypes,
     filters,
+    Request,
 )
 from twilio.rest import Client
 import stripe
 
 # -------------------------
-# CONFIG (Environment variables)
+# CONFIG (env variables)
 # -------------------------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
@@ -24,7 +25,7 @@ TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")  # e.g., https://otp-xxxx.onrender.com
-PORT = int(os.environ.get("PORT", 5000))
+PORT = int(os.getenv("PORT", 5000))
 
 # -------------------------
 # Initialize services
@@ -32,27 +33,21 @@ PORT = int(os.environ.get("PORT", 5000))
 stripe.api_key = STRIPE_SECRET_KEY
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
+# Custom Request for Telegram Bot (pool size + timeouts)
+request = Request(
+    connect_timeout=20,
+    read_timeout=20,
+    pool_timeout=20,
+    pool_size=20
+)
+
+bot = Bot(token=TELEGRAM_TOKEN, request=request)
+application = ApplicationBuilder().bot(bot).build()
+
 # -------------------------
 # Flask app
 # -------------------------
 app = Flask(__name__)
-
-# -------------------------
-# Telegram Bot (with increased pool size)
-# -------------------------
-application = (
-    ApplicationBuilder()
-    .token(TELEGRAM_TOKEN)
-    .get_updates_http_kwargs({
-        "connect_timeout": 20,
-        "read_timeout": 20,
-        "pool_timeout": 20,
-        "pool_size": 20
-    })
-    .build()
-)
-
-application = ApplicationBuilder().bot(bot).build()
 
 # -------------------------
 # State storage
@@ -84,6 +79,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("📞 Make Call", callback_data="make_call")],
             [InlineKeyboardButton("ℹ️ Help", callback_data="help")],
         ]
+
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     if update.message:
@@ -150,6 +146,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
+    # Phone number input
     if text.startswith("+") and text[1:].isdigit():
         user_phone_numbers[user_id] = text
         keyboard = InlineKeyboardMarkup([
@@ -162,6 +159,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Custom call message
     if user_id in user_phone_numbers:
         user_last_message[user_id] = text
         await update.message.reply_text("📞 Use /call to place the call now.")
@@ -189,7 +187,7 @@ async def call_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
     try:
-        update = Update.de_json(request.json, application.bot)
+        update = Update.de_json(request.json, bot)
         asyncio.run_coroutine_threadsafe(application.process_update(update), asyncio.get_event_loop())
         return "ok", 200
     except Exception as e:
@@ -200,7 +198,7 @@ def telegram_webhook():
 def set_webhook():
     webhook_url = f"{RENDER_EXTERNAL_URL}/{TELEGRAM_TOKEN}"
     try:
-        asyncio.run(application.bot.set_webhook(webhook_url))
+        asyncio.run(bot.set_webhook(webhook_url))
         return f"✅ Webhook set to {webhook_url}", 200
     except Exception as e:
         print("Webhook error:", e)
@@ -235,4 +233,3 @@ if __name__ == "__main__":
     asyncio.run(application.initialize())
     asyncio.run(application.start())
     asyncio.get_event_loop().run_forever()
-
