@@ -306,9 +306,19 @@ def call_status():
                 bot_loop
             )
             fut.result(timeout=5)
+
+            # After call ends, show main menu automatically
+            if call_status_val == "completed":
+                fut_menu = asyncio.run_coroutine_threadsafe(
+                    application.bot.send_message(chat_id=chat_id, text="Main Menu:", reply_markup=get_main_keyboard(chat_id)),
+                    bot_loop
+                )
+                fut_menu.result(timeout=5)
+
         except Exception:
             log.exception("Failed to send call status to Telegram")
     return ("", 204)
+
 
 @flask_app.route("/success")
 def payment_success():
@@ -353,3 +363,4 @@ t.start()
 if __name__ == "__main__":
     log.info("Starting Flask on port %s", PORT)
     flask_app.run(host="0.0.0.0", port=PORT)
+
