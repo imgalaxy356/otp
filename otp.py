@@ -13,7 +13,8 @@ from telegram.ext import (
 from twilio.rest import Client
 from twilio.twiml.voice_response import VoiceResponse, Gather
 import stripe
-
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
 # -------------------------
 # Load environment variables
 # -------------------------
@@ -214,9 +215,9 @@ flask_app = Flask(__name__)
 def telegram_webhook():
     data = request.get_json(force=True)
     update = Update.de_json(data, application.bot)
-    # Use thread-safe async scheduling
-    asyncio.run_coroutine_threadsafe(application.process_update(update), asyncio.get_event_loop())
+    asyncio.run_coroutine_threadsafe(application.process_update(update), loop)
     return "OK", 200
+
 
 @flask_app.route("/voice", methods=["POST", "GET"])
 def voice():
@@ -250,11 +251,21 @@ def start_loop():
     asyncio.get_event_loop().run_forever()
 
 if __name__ == "__main__":
-    # Initialize and start the bot
-    asyncio.get_event_loop().create_task(application.initialize())
-    asyncio.get_event_loop().create_task(application.start())
-    # Run asyncio loop in a background thread
-    import threading
-    threading.Thread(target=start_loop, daemon=True).start()
-    # Run Flask in main thread
-    flask_app.run(host="0.0.0.0", port=PORT)
+    async def start_bot():
+        await application.initialize()
+        await application.start()
+        await application.updater.start_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TELEGRAM_TOKEN,
+            webhook_url=f"{RENDER_EXTERNAL_URL}/{TELEGRAM_TOKEN}"
+        )
+
+    # Run Telegram bot inside the same loop
+    loop.create_task(start_bot())
+
+    # Run Flask inside another thread
+    threading.Thread(target=lambda: flask_app.run(host="0.0.0.0", port=PORT), daemon=True).start()
+
+    loop.run_forever()
+
