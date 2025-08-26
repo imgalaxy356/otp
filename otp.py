@@ -61,7 +61,7 @@ def load_paid_users():
     except FileNotFoundError:
         log.warning("paid_users.json not found. Starting with default seeded user.")
         # Seeded user
-        paid_users = {6910149689: datetime.now(timezone.utc) + timedelta(days=4)}
+        paid_users = {}
         save_paid_users()
 
 def save_paid_users():
@@ -386,3 +386,4 @@ t.start()
 if __name__ == "__main__":
     log.info("Starting Flask on port %s", PORT)
     flask_app.run(host="0.0.0.0", port=PORT)
+
