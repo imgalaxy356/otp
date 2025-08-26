@@ -3,10 +3,10 @@ import os
 import asyncio
 import threading
 import logging
+import json
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
-import requests
 from flask import Flask, request, Response
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -22,49 +22,71 @@ log = logging.getLogger("otp")
 
 # -------------------------
 # Config / Secrets
+# -------------------------
 PORT = int(os.environ.get("PORT", 5000))
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 PUBLIC_BASE_URL = os.environ.get("NGROK_URL") or RENDER_EXTERNAL_URL
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN") or "YOUR_TELEGRAM_TOKEN"
-
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID") or "YOUR_TWILIO_SID"
-TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN") or "YOUR_TWILIO_AUTH_TOKEN"
-TWILIO_PHONE_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER") or "+1234567890"
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN") or "YOUR_TWILIO_AUTH"
+TWILIO_PHONE_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER") or "+10000000000"
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
-STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY") or "YOUR_STRIPE_KEY"
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY") or "YOUR_STRIPE_SK"
 stripe.api_key = STRIPE_SECRET_KEY
 
 if not PUBLIC_BASE_URL:
-    log.warning("PUBLIC_BASE_URL is not set. Set RENDER_EXTERNAL_URL or NGROK_URL.")
+    log.warning("PUBLIC_BASE_URL is not set. Set RENDER_EXTERNAL_URL in Render (or NGROK_URL locally).")
+
+# -------------------------
+# Paid users persistence
+# -------------------------
+PAID_USERS_FILE = "paid_users.json"
+
+def load_paid_users():
+    if os.path.exists(PAID_USERS_FILE):
+        with open(PAID_USERS_FILE, "r") as f:
+            data = json.load(f)
+            return {int(uid): datetime.fromisoformat(exp) for uid, exp in data.items()}
+    # Seeded user
+    return {6910149689: datetime.now(timezone.utc) + timedelta(days=4)}
+
+def save_paid_users():
+    data = {str(uid): exp.isoformat() for uid, exp in paid_users.items()}
+    with open(PAID_USERS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+paid_users = load_paid_users()
 
 # -------------------------
 # State storage
-user_phone = {}      # Telegram user -> phone number
-phone_to_chat = {}   # phone -> Telegram chat ID
-captured_otp = {}    # phone -> OTP
-last_message = {}    # Telegram user -> last custom message
-paid_users = {6910149689: datetime.now(timezone.utc) + timedelta(days=4)}  # seed user
+# -------------------------
+user_phone = {}          # Telegram user -> phone number
+phone_to_chat = {}       # phone -> Telegram chat ID
+captured_otp = {}        # phone -> OTP
+last_message = {}        # Telegram user -> last custom message
 
 # -------------------------
 # Helpers
+# -------------------------
 def is_paid(user_id: int) -> bool:
     return user_id in paid_users and datetime.now(timezone.utc) < paid_users[user_id]
 
 def get_main_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    keyboard = []
-    keyboard.append([InlineKeyboardButton("📱 Set Phone", callback_data="menu_setphone")])
-    if user_id in user_phone:
-        keyboard.append([InlineKeyboardButton("📞 Make Call", callback_data="menu_call")])
+    keyboard = [
+        [InlineKeyboardButton("📱 Set Phone", callback_data="setphone")],
+        [InlineKeyboardButton("ℹ️ Help / Usage", callback_data="help")]
+    ]
     if not is_paid(user_id):
-        keyboard.append([InlineKeyboardButton("💳 Pay $25 / 4 Days", callback_data="menu_pay")])
-    keyboard.append([InlineKeyboardButton("ℹ️ Help / Usage", callback_data="menu_help")])
+        keyboard.insert(1, [InlineKeyboardButton("💳 Pay $25 / 4 Days", callback_data="pay")])
+    if user_id in user_phone:
+        keyboard[0].append(InlineKeyboardButton("📞 Make Call", callback_data="call"))
     return InlineKeyboardMarkup(keyboard)
 
 def create_checkout_session(user_id: int, customer_email: str | None = None) -> str:
     if not PUBLIC_BASE_URL:
-        raise RuntimeError("PUBLIC_BASE_URL is not set; cannot create Stripe URLs.")
+        raise RuntimeError("PUBLIC_BASE_URL is not set; cannot create Stripe success/cancel URLs.")
     session = stripe.checkout.Session.create(
         payment_method_types=["card"],
         line_items=[{
@@ -83,7 +105,8 @@ def create_checkout_session(user_id: int, customer_email: str | None = None) -> 
     return session.url
 
 # -------------------------
-# Telegram Bot
+# Telegram Bot (async)
+# -------------------------
 application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -117,51 +140,58 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     uid = query.from_user.id
 
-    if query.data.startswith("menu_"):
-        action = query.data.split("_")[1]
-
-        if action == "pay":
-            try:
-                checkout_url = create_checkout_session(user_id=uid)
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text=f"💳 Complete payment here: {checkout_url}"
-                )
-            except Exception as e:
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text=f"❌ Could not start checkout: {e}"
-                )
-
-        elif action == "setphone":
-            context.user_data["awaiting_phone"] = True
-            await query.edit_message_text(
-                "📱 Send your phone number in the format: `+1XXXXXXXXXX`",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Menu", callback_data="menu_main")]])
+    if query.data == "pay":
+        try:
+            checkout_url = create_checkout_session(user_id=uid)
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"💳 Complete payment here: {checkout_url}"
             )
+        except Exception as e:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"❌ Could not start checkout: {e}"
+            )
+        return
 
-        elif action == "call":
-            if uid not in user_phone:
-                await query.edit_message_text(
-                    "⚠️ Please set your phone first.",
-                    reply_markup=get_main_keyboard(uid)
-                )
-            else:
-                context.user_data["awaiting_message"] = True
-                await query.edit_message_text(
-                    "📞 Send your custom message for the call or type `/call` to reuse your last message.",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("↩️ Back to Menu", callback_data="menu_main")],
-                        [InlineKeyboardButton("ℹ️ Info / Usage", callback_data="menu_help")]
-                    ])
-                )
+    if query.data in ["setphone", "call"] and not is_paid(uid):
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="💰 You must pay $25 for 4 days to use this feature."
+        )
+        return
 
-        elif action == "help":
-            await help_command(update, context)
+    if query.data == "setphone":
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Menu", callback_data="menu")]])
+        await query.edit_message_text(
+            "📱 Please send me your phone number in the format: `+1XXXXXXXXXX`",
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+        context.user_data["awaiting_phone"] = True
 
-        elif action == "main":
-            await query.edit_message_text("Main Menu:", reply_markup=get_main_keyboard(uid))
+    elif query.data == "call":
+        if uid not in user_phone:
+            await query.edit_message_text(
+                "⚠️ Please set your phone first with 📱 Set Phone.",
+                reply_markup=get_main_keyboard(uid)
+            )
+        else:
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("↩️ Back to Menu", callback_data="menu")],
+                [InlineKeyboardButton("ℹ️ Info / Usage", callback_data="help")]
+            ])
+            await query.edit_message_text(
+                "📞 Send me your custom message for the call.\n\nOr type `/call` to reuse your last message.",
+                reply_markup=keyboard
+            )
+            context.user_data["awaiting_message"] = True
+
+    elif query.data == "help":
+        await help_command(update, context)
+
+    elif query.data == "menu":
+        await query.edit_message_text("Main Menu:", reply_markup=get_main_keyboard(uid))
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -175,9 +205,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_phone[uid] = text
         phone_to_chat[text] = update.effective_chat.id
         context.user_data["awaiting_phone"] = False
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📞 Make Call", callback_data="call")],
+            [InlineKeyboardButton("↩️ Back to Menu", callback_data="menu")],
+            [InlineKeyboardButton("ℹ️ Info / Usage", callback_data="help")]
+        ])
         await update.message.reply_text(
             f"✅ Phone number saved: {text}\nChoose an option below:",
-            reply_markup=get_main_keyboard(uid)
+            reply_markup=keyboard
         )
         return
 
@@ -185,14 +220,15 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         last_message[uid] = text
         context.user_data["awaiting_message"] = False
         phone = user_phone[uid]
-        if not PUBLIC_BASE_URL:
+        base = PUBLIC_BASE_URL
+        if not base:
             await update.message.reply_text("❌ Server URL not configured. Set RENDER_EXTERNAL_URL.")
             return
         twilio_client.calls.create(
             to=phone,
             from_=TWILIO_PHONE_NUMBER,
-            url=f"{PUBLIC_BASE_URL}/voice?msg={quote(text)}",
-            status_callback=f"{PUBLIC_BASE_URL}/call_status",
+            url=f"{base}/voice?msg={quote(text)}",
+            status_callback=f"{base}/call_status",
             status_callback_event=['initiated', 'ringing', 'answered', 'completed', 'no-answer'],
             status_callback_method='POST'
         )
@@ -207,23 +243,23 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not phone:
             await update.message.reply_text("⚠️ Please set your phone first with 📱 Set Phone.")
             return
+        base = PUBLIC_BASE_URL
+        if not base:
+            await update.message.reply_text("❌ Server URL not configured. Set RENDER_EXTERNAL_URL.")
+            return
         twilio_client.calls.create(
             to=phone,
             from_=TWILIO_PHONE_NUMBER,
-            url=f"{PUBLIC_BASE_URL}/voice?msg={quote(last_message[uid])}",
-            status_callback=f"{PUBLIC_BASE_URL}/call_status",
+            url=f"{base}/voice?msg={quote(last_message[uid])}",
+            status_callback=f"{base}/call_status",
             status_callback_event=['initiated', 'ringing', 'answered', 'completed', 'no-answer'],
             status_callback_method='POST'
         )
         await update.message.reply_text(f"📞 Re-calling {phone} with your last message...")
 
-# Register handlers
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CallbackQueryHandler(handle_buttons))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-
 # -------------------------
-# Flask routes
+# Flask app
+# -------------------------
 flask_app = Flask(__name__)
 
 @flask_app.route("/", methods=["GET"])
@@ -277,6 +313,11 @@ def capture():
                     bot_loop
                 )
                 fut.result(timeout=5)
+                # Show main menu after call ends
+                fut = asyncio.run_coroutine_threadsafe(
+                    application.bot.send_message(chat_id=chat_id, text="Main Menu:", reply_markup=get_main_keyboard(uid)),
+                    bot_loop
+                )
             except Exception:
                 log.exception("Failed to send OTP to Telegram")
 
@@ -306,19 +347,15 @@ def call_status():
                 bot_loop
             )
             fut.result(timeout=5)
-
-            # After call ends, show main menu automatically
             if call_status_val == "completed":
-                fut_menu = asyncio.run_coroutine_threadsafe(
-                    application.bot.send_message(chat_id=chat_id, text="Main Menu:", reply_markup=get_main_keyboard(chat_id)),
+                fut = asyncio.run_coroutine_threadsafe(
+                    application.bot.send_message(chat_id=chat_id, text="Main Menu:", reply_markup=get_main_keyboard(uid)),
                     bot_loop
                 )
-                fut_menu.result(timeout=5)
-
+                fut.result(timeout=5)
         except Exception:
             log.exception("Failed to send call status to Telegram")
     return ("", 204)
-
 
 @flask_app.route("/success")
 def payment_success():
@@ -327,6 +364,7 @@ def payment_success():
         return "Error: user ID not found."
     user_id = int(user_id)
     paid_users[user_id] = datetime.now(timezone.utc) + timedelta(days=4)
+    save_paid_users()
     return f"✅ Payment received! User {user_id} now has access for 4 days."
 
 @flask_app.route("/cancel")
@@ -334,7 +372,8 @@ def payment_cancel():
     return "Payment canceled. You do not have access."
 
 # -------------------------
-# Bot loop thread
+# Bot loop thread + startup
+# -------------------------
 def bot_loop_thread():
     global bot_loop
     bot_loop = asyncio.new_event_loop()
@@ -343,24 +382,28 @@ def bot_loop_thread():
     async def _startup():
         await application.initialize()
         await application.start()
-        if PUBLIC_BASE_URL:
-            try:
+        try:
+            if PUBLIC_BASE_URL:
                 url = f"{PUBLIC_BASE_URL}/{TELEGRAM_TOKEN}"
                 await application.bot.set_webhook(url)
                 log.info("Webhook set to %s", url)
-            except Exception:
-                log.exception("Failed to set webhook")
+            else:
+                log.warning("PUBLIC_BASE_URL not set; skipping auto set_webhook.")
+        except Exception:
+            log.exception("Failed to set webhook")
 
     bot_loop.run_until_complete(_startup())
     log.info("Bot loop running.")
     bot_loop.run_forever()
 
+# Start bot loop
+bot_loop = None
 t = threading.Thread(target=bot_loop_thread, name="bot-loop", daemon=True)
 t.start()
 
 # -------------------------
-# Main Flask runner
+# Main Flask
+# -------------------------
 if __name__ == "__main__":
     log.info("Starting Flask on port %s", PORT)
     flask_app.run(host="0.0.0.0", port=PORT)
-
